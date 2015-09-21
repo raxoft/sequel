@@ -2,7 +2,7 @@ Sequel.require 'adapters/utils/emulate_offset_with_row_number'
 
 module Sequel
   module DB2
-    @use_clob_as_blob = true
+    @use_clob_as_blob = false
 
     class << self
       # Whether to use clob as the generic File type, true by default.
@@ -10,6 +10,8 @@ module Sequel
     end
 
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       AUTOINCREMENT = 'GENERATED ALWAYS AS IDENTITY'.freeze
       NOT_NULL      = ' NOT NULL'.freeze
       NULL          = ''.freeze
@@ -28,7 +30,7 @@ module Sequel
       alias_method :server_version, :db2_version
 
       # Use SYSIBM.SYSCOLUMNS to get the information on the tables.
-      def schema_parse_table(table, opts = {})
+      def schema_parse_table(table, opts = OPTS)
         m = output_identifier_meth(opts[:dataset])
         im = input_identifier_meth(opts[:dataset])
         metadata_dataset.with_sql("SELECT * FROM SYSIBM.SYSCOLUMNS WHERE TBNAME = #{literal(im.call(table))} ORDER BY COLNO").
@@ -38,8 +40,12 @@ module Sequel
               column[:db_type] << "(#{column[:longlength]},#{column[:scale]})"
             end
             column[:allow_null]  = column.delete(:nulls) == 'Y'
-            column[:primary_key] = column.delete(:identity) == 'Y' || !column[:keyseq].nil?
+            identity = column.delete(:identity) == 'Y'
+            if column[:primary_key] = identity || !column[:keyseq].nil?
+              column[:auto_increment] = identity
+            end
             column[:type]        = schema_column_type(column[:db_type])
+            column[:max_length]  = column[:longlength] if column[:type] == :string
             [ m.call(column.delete(:name)), column]
           end
       end
@@ -59,7 +65,7 @@ module Sequel
       end
 
       # Use SYSCAT.INDEXES to get the indexes for the table
-      def indexes(table, opts = {})
+      def indexes(table, opts = OPTS)
         m = output_identifier_meth
         indexes = {}
         metadata_dataset.
@@ -75,6 +81,25 @@ module Sequel
       # DB2 supports transaction isolation levels.
       def supports_transaction_isolation_levels?
         true
+      end
+
+      # On DB2, a table might need to be REORGed if you are testing existence
+      # of it.  This REORGs automatically if the database raises a specific
+      # error that indicates it should be REORGed.
+      def table_exists?(name)
+        v ||= false # only retry once
+        sch, table_name = schema_and_table(name)
+        name = SQL::QualifiedIdentifier.new(sch, table_name) if sch
+        from(name).first
+        true
+      rescue DatabaseError => e
+        if e.to_s =~ /Operation not allowed for reason code "7" on table/ && v == false
+          # table probably needs reorg
+          reorg(name)
+          v = true
+          retry 
+        end
+        false
       end
 
       private
@@ -110,6 +135,16 @@ module Sequel
           end
         else
           super
+        end
+      end
+
+      # REORG the related table whenever it is altered.  This is not always
+      # required, but it is necessary for compatibilty with other Sequel
+      # code in many cases.
+      def apply_alter_table(name, ops)
+        alter_table_sql_list(name, ops).each do |sql|
+          execute_ddl(sql)
+          reorg(name)
         end
       end
 
@@ -184,12 +219,12 @@ module Sequel
       # Run the REORG TABLE command for the table, necessary when
       # the table has been altered.
       def reorg(table)
-        synchronize(opts[:server]){|c| c.execute(reorg_sql(table))}
+        execute_ddl(reorg_sql(table))
       end
 
       # The SQL to use for REORGing a table.
       def reorg_sql(table)
-        "CALL ADMIN_CMD(#{literal("REORG TABLE #{table}")})"
+        "CALL SYSPROC.ADMIN_CMD(#{literal("REORG TABLE #{quote_schema_table(table)}")})"
       end
 
       # Treat clob as blob if use_clob_as_blob is true
@@ -219,6 +254,11 @@ module Sequel
       # DB2 uses clob for text types.
       def uses_clob_for_text?
         true
+      end
+
+      # DB2 supports views with check option.
+      def view_with_check_option_support
+        :local
       end
     end
 
@@ -254,16 +294,8 @@ module Sequel
 
       def complex_expression_sql_append(sql, op, args)
         case op
-        when :&, :|, :^
-          # works with db2 v9.5 and after
-          op = BITWISE_METHOD_MAP[op]
-          sql << complex_expression_arg_pairs(args){|a, b| literal(SQL::Function.new(op, a, b))}
-        when :<<
-          sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} * POWER(2, #{literal(b)}))"}
-        when :>>
-          sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} / POWER(2, #{literal(b)}))"}
-        when :%
-          sql << complex_expression_arg_pairs(args){|a, b| "MOD(#{literal(a)}, #{literal(b)})"}
+        when :&, :|, :^, :%, :<<, :>>
+          complex_expression_emulate_append(sql, op, args)
         when :'B~'
           literal_append(sql, SQL::Function.new(:BITNOT, *args))
         when :extract
@@ -276,6 +308,10 @@ module Sequel
         end
       end
 
+      def supports_cte?(type=:select)
+        type == :select
+      end
+
       # DB2 supports GROUP BY CUBE
       def supports_group_cube?
         true
@@ -286,11 +322,21 @@ module Sequel
         true
       end
 
+      # DB2 supports GROUPING SETS
+      def supports_grouping_sets?
+        true
+      end
+
       # DB2 does not support IS TRUE.
       def supports_is_true?
         false
       end
 
+      # DB2 supports lateral subqueries
+      def supports_lateral_subqueries?
+        true
+      end
+      
       # DB2 does not support multiple columns in IN.
       def supports_multiple_column_in?
         false
@@ -318,6 +364,10 @@ module Sequel
 
       private
 
+      def empty_from_sql
+        EMPTY_FROM_TABLE
+      end
+
       # DB2 needs the standard workaround to insert all default values into
       # a table with more than one column.
       def insert_supports_empty_values?
@@ -343,9 +393,14 @@ module Sequel
         end
       end
 
-      # Add a fallback table for empty from situation
-      def select_from_sql(sql)
-        @opts[:from] ? super : (sql << EMPTY_FROM_TABLE)
+      # DB2 can insert multiple rows using a UNION
+      def multi_insert_sql_strategy
+        :union
+      end
+
+      # DB2 does not require that ROW_NUMBER be ordered.
+      def require_offset_order?
+        false
       end
 
       # Modify the sql to limit the number of rows returned
@@ -370,6 +425,11 @@ module Sequel
         end
       end
       
+      # DB2 supports quoted function names.
+      def supports_quoted_function_names?
+        true
+      end
+
       def _truncate_sql(table)
         # "TRUNCATE #{table} IMMEDIATE" is only for newer version of db2, so we
         # use the following one

@@ -22,11 +22,11 @@ module Sequel
       # Configure the plugin by setting the available options.  Note that
       # if this method is run more than once, previous settings are ignored,
       # and it will just use the settings given or the default settings.  Options:
-      # * :create - The field to hold the create timestamp (default: :created_at)
-      # * :force - Whether to overwrite an existing create timestamp (default: false)
-      # * :update - The field to hold the update timestamp (default: :updated_at)
-      # * :update_on_create - Whether to set the update timestamp to the create timestamp when creating (default: false)
-      def self.configure(model, opts={})
+      # :create :: The field to hold the create timestamp (default: :created_at)
+      # :force :: Whether to overwrite an existing create timestamp (default: false)
+      # :update :: The field to hold the update timestamp (default: :updated_at)
+      # :update_on_create :: Whether to set the update timestamp to the create timestamp when creating (default: false)
+      def self.configure(model, opts=OPTS)
         model.instance_eval do
           @create_timestamp_field = opts[:create]||:created_at
           @update_timestamp_field = opts[:update]||:updated_at
@@ -47,13 +47,8 @@ module Sequel
           @create_timestamp_overwrite
         end
         
-        # Copy the class instance variables used from the superclass to the subclass
-        def inherited(subclass)
-          super
-          [:@create_timestamp_field, :@update_timestamp_field, :@create_timestamp_overwrite, :@set_update_timestamp_on_create].each do |iv|
-            subclass.instance_variable_set(iv, instance_variable_get(iv))
-          end
-        end
+        Plugins.inherited_instance_variables(self, :@create_timestamp_field=>nil, :@update_timestamp_field=>nil,
+          :@create_timestamp_overwrite=>nil, :@set_update_timestamp_on_create=>nil)
         
         # Whether to set the update timestamp to the create timestamp when creating
         def set_update_timestamp_on_create?
@@ -62,12 +57,6 @@ module Sequel
       end
 
       module InstanceMethods
-        # Set the create timestamp when creating
-        def before_create
-          set_create_timestamp
-          super
-        end
-        
         # Set the update timestamp when updating
         def before_update
           set_update_timestamp
@@ -75,6 +64,12 @@ module Sequel
         end
         
         private
+        
+        # Set the create timestamp when creating
+        def _before_validation
+          set_create_timestamp if new?
+          super
+        end
         
         # If the object has accessor methods for the create timestamp field, and
         # the create timestamp value is nil or overwriting it is allowed, set the
@@ -84,7 +79,7 @@ module Sequel
         def set_create_timestamp(time=nil)
           field = model.create_timestamp_field
           meth = :"#{field}="
-          self.send(meth, time||=Sequel.datetime_class.now) if respond_to?(field) && respond_to?(meth) && (model.create_timestamp_overwrite? || send(field).nil?)
+          set_column_value(meth, time||=model.dataset.current_datetime) if respond_to?(field) && respond_to?(meth) && (model.create_timestamp_overwrite? || get_column_value(field).nil?)
           set_update_timestamp(time) if model.set_update_timestamp_on_create?
         end
         
@@ -92,7 +87,7 @@ module Sequel
         # object has a setter method for the update timestamp field.
         def set_update_timestamp(time=nil)
           meth = :"#{model.update_timestamp_field}="
-          self.send(meth, time||Sequel.datetime_class.now) if respond_to?(meth)
+          set_column_value(meth, time||model.dataset.current_datetime) if respond_to?(meth)
         end
       end
     end

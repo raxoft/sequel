@@ -9,7 +9,7 @@ many Sequel::Dataset methods that take virtual row blocks.
 
 Virtual Rows were created to work around the issue that some parts of
 Sequel's standard DSL could not be used on ruby 1.9.  For example, the
-following Sequel code works on ruby 1.8, but not ruby 1.9:
+following Sequel code historically worked on ruby 1.8, but not ruby 1.9:
 
   dataset.where(:a > :b[:c])
   # WHERE a > b(c)
@@ -68,7 +68,7 @@ inside the proc.  If that doesn't make sense, maybe this example will help:
   # WHERE c > (a - 32)
   
 There are two related differences here.  First is the usage of <tt>o.c</tt> vs +c+,
-and second is the difference between the the use of +a+.  In the regular proc,
+and second is the difference between the use of +a+.  In the regular proc,
 you couldn't call +c+ without an explicit receiver in the proc, unless the self of the
 surrounding scope responded to it.  For +a+, note how ruby calls the method on
 the receiver of the surrounding scope in the regular proc, which returns an integer,
@@ -95,8 +95,8 @@ local variable access.  This is mostly useful in instance_evaled procs:
 
 == VirtualRow Methods
 
-VirtualRow is a class that returns SQL::Identifiers, SQL::QualifiedIdentifiers,
-SQL::Functions, or SQL::WindowFunctions depending on how it is called.
+VirtualRow is a class that returns SQL::Identifiers, SQL::QualifiedIdentifiers, or
+SQL::Functions depending on how it is called.
 
 == SQL::Identifiers - Regular columns
 
@@ -140,62 +140,66 @@ your function call:
   ds.where{function(1, a) > 1}
   # WHERE function(1, a) > 1
 
-If the SQL function does not accept any arguments, you need to provide an empty
-block to the method to distinguish it from a call that will produce an
-SQL::Identifier:
+If the SQL function does not accept any arguments, create an identifier, then
+call the function method on it to produce a function:
 
-  ds.select{|o| o.version{}}
-  ds.select{version{}}
+  ds.select{|o| o.version.function}
+  ds.select{version.function}
   # SELECT version()
   
-To use the SQL wildcard (*) as the sole argument in a function call (most often
-used with the count function), you should provide :* as the sole argument to
-the method, and provide an empty block to the method:
+To use the SQL wildcard (*) as the sole argument in a function call, create a
+function without arguments, then call the * method on the function:
   
-  ds.select{|o| o.count(:*){}}
-  ds.select{count(:*){}}
+  ds.select{|o| o.count.function.*}
+  ds.select{count.function.*}
   # SELECT count(*)
 
-To append the DISTINCT keyword before the method arguments, you need to make
-:distinct the first argument of the method call, and provide an empty block to
-the method:
+To append the DISTINCT keyword before the method arguments, just call the
+distinct method on the returned Function:
 
-  ds.select{|o| o.count(:distinct, o.col1){}}
-  ds.select{count(:distinct, col1){}}
+  ds.select{|o| o.count(o.col1).distinct}
+  ds.select{count(col1).distinct}
   # SELECT count(DISTINCT col1)
   
-To use multiple columns with the DISTINCT keyword, use multiple arguments in
-the method call:
-
-  ds.select{|o| o.count(:distinct, o.col1, o.col2){}}
-  ds.select{count(:distinct, col1, col2){}}
+  ds.select{|o| o.count(o.col1, o.col2).distinct}
+  ds.select{count(col1, col2).distinct}
   # SELECT count(DISTINCT col1, col2)
   
-== SQL::WindowFunctions - SQL window function calls
+== SQL::Functions with windows - SQL window function calls
 
-SQL::WindowFunctions can be thought of as calls to SQL window functions.  Not
-all databases support them, but they are very helpful for certain types of
-queries.  To use them, you need to make :over the first argument of the method
-call, with an optional hash as the second argument, and provide an empty block
-to the method. Here are some examples of use:
+Not all databases support window functions, but they are very helpful for certain types of
+queries.  To use them, you should just call the over method on the Function
+object returned, with the options for the window:
 
-  ds.select{|o| o.rank(:over){}}
-  ds.select{rank(:over){}}
+  ds.select{|o| o.rank.function.over}
+  ds.select{rank.function.over}
   # SELECT rank() OVER ()
   
-  ds.select{|o| o.count(:over, :*=>true){}}
-  ds.select{count(:over, :*=>true){}}
+  ds.select{|o| o.count.function.*.over}
+  ds.select{count.function.*.over}
   # SELECT count(*) OVER ()
   
-  ds.select{|o| o.sum(:over, :args=>o.col1, :partition=>o.col2, :order=>o.col3){}}
-  ds.select{sum(:over, :args=>col1, :partition=>col2, :order=>col3){}}
+  ds.select{|o| o.sum(o.col1).over(:partition=>o.col2, :order=>o.col3)}
+  ds.select{sum(col1).over(:partition=>col2, :order=>col3)}
   # SELECT sum(col1) OVER (PARTITION BY col2 ORDER BY col3)
 
 == Operators
 
-VirtualRows use method_missing to handle almost all method calls.  However, they
-have special handling of some operator methods to make certain things easier. The
-operators all use a prefix form.
+VirtualRows use method_missing to handle almost all method calls.  Since the
+objects given by method_missing are SQL::Identifiers, SQL::QualifiedIdentifiers
+or SQL::Functions, you can use all operators that they provide (see
+DatasetFiltering[http://sequel.jeremyevans.net/rdoc/files/doc/dataset_filtering_rdoc.html#label-Filtering+using+expressions]):
+
+  ds.select{|o| o.price - 100}
+  ds.select{o.price - 100}
+  # SELECT (price - 100)
+
+  ds.where{|o| (o.price < 200) & (o.tax * 100 >= 23)}
+  ds.where{(price < 200) & (tax * 100 >= 0.23)}
+  # WHERE ((price < 200) AND ((tax * 100) >= 0.23))
+
+However, VirtualRows have special handling of some operator methods to make
+certain things easier.  The operators all use a prefix form.
 
 === Math Operators
 
@@ -238,12 +242,12 @@ virtual row block to create a literal string:
 You can use this on a regular virtual row block too, but it
 doesn't look as nice:
 
-  ds.where{|o| o.>(:a, o.`('some SQL')}
+  ds.where{|o| o.>(:a, o.`('some SQL'))}
 
 == Returning multiple values
 
 It's common when using select and order virtual row blocks to want to
-return multiple values.  If you want to do that, you just need to return a single
+return multiple values.  If you want to do that, you just need to return an 
 array:
 
   ds.select{|o| [o.column1, o.sum(o.column2).as(o.sum)]}

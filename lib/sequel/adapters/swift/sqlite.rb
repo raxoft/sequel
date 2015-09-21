@@ -8,7 +8,20 @@ module Sequel
     module SQLite
       # Database instance methods for SQLite databases accessed via Swift.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::SQLite::DatabaseMethods
+
+        DATABASE_ERROR_REGEXPS = {
+          /\AUNIQUE constraint failed: / => UniqueConstraintViolation,
+          /\AFOREIGN KEY constraint failed/ => ForeignKeyConstraintViolation,
+          /\ACHECK constraint failed/ => CheckConstraintViolation,
+          /\A(SQLITE ERROR 19 \(CONSTRAINT\) : )?constraint failed/ => ConstraintViolation,
+          /may not be NULL\z|NOT NULL constraint failed: .+/ => NotNullConstraintViolation,
+          /\ASQLITE ERROR \d+ \(\) : CHECK constraint failed: / => CheckConstraintViolation
+        }.freeze
+        def database_error_regexps
+          DATABASE_ERROR_REGEXPS
+        end
 
         # Set the correct pragmas on the connection.
         def connect(opts)
@@ -26,7 +39,7 @@ module Sequel
         
         # Use Swift's escape method for quoting.
         def literal_string_append(sql, s)
-          sql << APOS << db.synchronize{|c| c.escape(s)} << APOS
+          sql << APOS << db.synchronize(@opts[:server]){|c| c.escape(s)} << APOS
         end
       end
     end

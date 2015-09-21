@@ -32,7 +32,7 @@ to ensure that all values have at least two characters.
 Unfortunately, sometimes there are situations where that is not possible.  For
 example, if you are using MySQL and don't have control over the database configuration,
 it's possible that if you attempt to insert a string with 300 characters into a
-varchar(255) field, that MySQL will just silently truncate it for you, instead of
+varchar(255) field, then MySQL may just silently truncate it for you, instead of
 raising an error.  In that case, it may be necessary to use a model validation
 to enforce the database integrity.
 
@@ -172,9 +172,14 @@ This is probably the most commonly used helper method, which checks if the speci
 
   class Album < Sequel::Model
     def validate
+      super
       validates_presence [:name, :website, :debut_album]
     end
   end
+
+=== +validates_not_null+
+
+This is similar to +validates_presence+, but only checks for NULL/nil values, allowing other blank objects such as empty strings or strings with just whitespace.
 
 === +validates_format+
 
@@ -182,6 +187,7 @@ This is probably the most commonly used helper method, which checks if the speci
 
   class Album < Sequel::Model
     def validate
+      super
       validates_format /\A\d\d\d-\d-\d{7}-\d-\d\z/, :isbn
       validates_format /\a[0-9a-zA-Z:' ]+\z/, :name
     end
@@ -194,6 +200,7 @@ These methods all deal with ensuring that the length of the specified attribute 
 
   class Album < Sequel::Model
     def validate
+      super
       validates_exact_length 17, :isbn
       validates_min_length 3, :name
       validates_max_length 100, :name
@@ -207,6 +214,7 @@ These methods check that the specified attributes can be valid integers or valid
 
   class Album < Sequel::Model
     def validate
+      super
       validates_integer :copies_sold
       validates_numeric :replaygain
     end
@@ -218,41 +226,40 @@ These methods check that the specified attributes can be valid integers or valid
 
   class Album < Sequel::Model
     def validate
+      super
       validates_includes [1, 2, 3, 4, 5], :rating
     end
   end
 
 === +validates_type+
 
-+validates_type+ checks that the specified attributes are instances of the class specified in the first argument.  The class can be specified as the class itself, or as a string or symbol with the class name:
++validates_type+ checks that the specified attributes are instances of the class specified in the first argument.  The class can be specified as the class itself, or as a string or symbol with the class name, or as a an array of classes.
 
   class Album < Sequel::Model
     def validate
+      super
       validates_type String, [:name, :website]
       validates_type :Artist, :artist
+      validates_type [String, Integer], :foo
     end
   end
 
-=== +validates_not_string+
+=== +validates_schema_types+
 
-+validates_not_string+ is a special validation designed to be used with the <tt>raise_on_typecast_failure = false</tt> setting.  By default, Sequel raises errors when typecasting fails, immediately when you try to set the value on the object:
-
-  album = Album.new
-  album.copies_sold = 'banana' # raises Sequel::InvalidValue
-
-The <tt>raise_on_typecast_failure = false</tt> setting tells Sequel to attempt to typecast values, but to silently ignore any errors raised:
++validates_schema_types+ uses the database metadata for the model's table to determine which ruby type(s) should be used for the given database type, and calls +validates_type+ with that ruby type.  It's designed to be used with the <tt>raise_on_typecast_failure = false</tt> setting (the default starting in Sequel 4).  <tt>raise_on_typecast_failure = false</tt>, Sequel attempts to typecast values, but silently ignores any errors raised:
 
   Album.raise_on_typecast_failure = false
   album = Album.new
   album.copies_sold = 'banana'
   album.copies_sold # => 'banana'
 
-+validates_not_string+ is designed to be used in web applications where all user input comes in as strings.  When the <tt>raise_on_typecast_failure = false</tt> setting is used in such an application, you can call +validates_not_string+ with all non-string columns.  If any of those columns has a string value, it's because the column was set and Sequel was not able to typecast it correctly, which means it probably isn't valid.  For example, let's say that you want to check that a couple of columns contain valid dates:
+When <tt>raise_on_typecast_failure = false</tt>, you can call +validates_schema_types+ with all columns.  If any of those columns has a value that doesn't match the type that Sequel expects, it's probably because the column was set and Sequel was not able to typecast it correctly, which means it probably isn't valid.  For example, let's say that you want to check that a couple of columns contain valid dates:
 
   class Album < Sequel::Model
     self.raise_on_typecast_failure = false
     def validate
-      validates_not_string [:release_date, :record_date]
+      super
+      validates_schema_types [:release_date, :record_date]
     end
   end
 
@@ -264,7 +271,7 @@ The <tt>raise_on_typecast_failure = false</tt> setting tells Sequel to attempt t
   album.valid? # => false
   album.errors # => {:release_date=>["is not a valid date"]}
 
-For web applications, you usually want the <tt>raise_on_typecast_failure = false</tt> setting, so that you can accept all of the input without raising an error, and then present the user with all error messages.  Without the setting, if the user submits any invalid data, Sequel will immediately raise an error.  +validates_not_string+ is helpful because it allows you to check for typecasting errors on non-string columns, and provides a good default error message stating that the attribute is not of the expected type.
+For web applications, you usually want the <tt>raise_on_typecast_failure = false</tt> setting, so that you can accept all of the input without raising an error, and then present the user with all error messages.  Without the setting, if the user submits any invalid data, Sequel will immediately raise an error.  +validates_schema_types+ is helpful because it allows you to check for typecasting errors on columns, and provides a good default error message stating that the attribute is not of the expected type.
 
 === +validates_unique+
 
@@ -288,12 +295,20 @@ You can mix and match the two approaches.  For example, if all albums should hav
 
 If you provide a block, it is called with the dataset to use for the uniqueness check, which you can then filter to scope the uniqueness validation to a subset of the model's dataset.
 
-Additionally, you can also include an optional options hash as the last argument.  Unlike the other validations, the options hash for +validates_unique+ only checks for two options:
+You can also include an options hash as the last argument.  Unlike the other validations, the options hash for +validates_unique+ only recognizes for these options:
 
+:dataset :: The base dataset to use for the unique query, defaults to the model's dataset
 :message :: The message to use
 :only_if_modified :: Only check the uniqueness if the object is new or one of the columns has been modified.
+:where :: A callable object where call takes three arguments, a dataset,
+          the current object, and an array of columns, and should return
+          a modified dataset that is filtered to include only rows with
+          the same values as the current object for each column in the array.
+          This is useful any time the unique constraints are derived from
+          the columns and not the columns themselves (such as unique constraints
+          on lower(column)).
 
-+validates_unique+ is the only method in +validation_helpers+ that checks with the database.  Attempting to validate uniqueness outside of the database suffers from a race condition, so any time you want to add a uniqueness validation, you should make sure to add a uniqueness constraint or unique index on the underlying database table.  See the {"Migrations and Schema Modification" guide}[link:files/doc/migration_rdoc.html] for details on how to do that.  
++validates_unique+ is the only method in +validation_helpers+ that checks with the database.  Attempting to validate uniqueness outside of the database suffers from a race condition, so any time you want to add a uniqueness validation, you should make sure to add a uniqueness constraint or unique index on the underlying database table.  See the {"Migrations and Schema Modification" guide}[rdoc-ref:doc/migration.rdoc] for details on how to do that.  
 
 == +validation_helpers+ Options
 
@@ -301,10 +316,11 @@ All +validation_helpers+ methods except +validates_unique+ accept the following 
 
 === <tt>:message</tt>
 
-The most commonly used option, used to override the default validation message.  Can be either a string or a proc.  If a string, it is used directly.  If a proc, the proc is called and should return a string.  If the validation method takes an argument before the array of attributes, that argument is passed as an argument to the proc. The exception is the +validates_not_string+ method, which doesn't take an argument, but passes the schema type symbol as the argument to the proc. 
+The most commonly used option, used to override the default validation message.  Can be either a string or a proc.  If a string, it is used directly.  If a proc, the proc is called and should return a string.  If the validation method takes an argument before the array of attributes, that argument is passed as an argument to the proc. The exception is the +validates_not_string+ method, which doesn't take an argument, but passes the schema type symbol as the argument to the proc.
 
   class Album < Sequel::Model
     def validate
+      super
       validates_presence :copies_sold, :message=>'was not given'
       validates_min_length 3, :name, :message=>proc{|s| "should be more than #{s} characters"}
     end
@@ -316,6 +332,7 @@ The <tt>:allow_nil</tt> option skips the validation if the attribute value is ni
 
   class Album < Sequel::Model
     def validate
+      super
       validates_presence :copies_sold
       validates_integer :copies_sold, :allow_nil=>true
     end
@@ -329,12 +346,17 @@ The <tt>:allow_blank</tt> is similar to the <tt>:allow_nil</tt> option, but inst
 
   class Album < Sequel::Model
     def validate
+      super
       validates_format /\Ahttps?:\/\//, :website, :allow_blank=>true
     end
   end
   a = Album.new
   a.website = ''
   a.valid? # true
+
+If you are going to use <tt>:allow_blank</tt> you should make sure that all objects respond to the blank? method. Sequel ships with an extension that will do this for you:
+
+  Sequel.extension :blank
 
 === <tt>:allow_missing</tt>
 
@@ -386,8 +408,9 @@ These are the default error messages for all of the helper methods in +validatio
 :length_range :: is too short or too long
 :max_length :: is longer than #{arg} characters
 :min_length :: is shorter than #{arg} characters
-:not_string :: is not a valid #{schema_type}
+:not_null :: is not present
 :numeric :: is not a number
+:schema_types :: is not a valid #{schema_type}
 :type :: is not a #{arg}
 :presence :: is not present
 :unique :: is already taken
@@ -403,6 +426,8 @@ It's easy to modify the default options used by +validation_helpers+.  All of th
    :format=>{:message=>'contains invalid characters', :allow_nil=>true})
 
 This updates the default messages that will be used for the presence, includes, max_length, and format validations, and sets the default value of the <tt>:allow_nil</tt> option to true for the includes, max_length, and format validations.
+
+You can also override <tt>Sequel::Model#default_validation_helpers_options</tt> private method to override these settings on a per-model or even per-instance basis.
 
 == Custom Validations
 
@@ -442,7 +467,7 @@ Let's say you want to add some default validations that apply to all of your mod
 
     def validate
       super
-      validates_format(/\A[^\x00-\x08\x0e-\x1f\x7f\x81\x8d\x8f\x90\x9d]*\z/,
+      validates_format(/\A[^\x00-\x08\x0e-\x1f\x7f\x81\x8d\x8f\x90\x9d]*\z/n,
        model.string_columns,
        :message=>"contains invalid characters")
     end
@@ -490,12 +515,31 @@ Here, you don't care about validating the release date if there were validation 
   album.errors.full_messages
   # => ["name cannot be empty"]
   
+Note that the column names used in the errors are used verbatim in the error messages.  If you want full control over the error messages, you can use +add+ with a literal string:
+
+  errors.add(:name, Sequel.lit("Album name is not valid"))
+  errors.full_messages
+  # => ["Album name is not valid"]
+
+Alternatively, feel free to override Sequel::Model::Errors#full_messages.  As long as it returns an array of strings, overridding it is completely safe.
+
 === +count+
 
 +count+ returns the total number of error messages in the errors.
 
   album.errors.count # => 1
 
-== +validation_class_methods+
+== Other Validation Plugins
 
-Sequel actually ships with two validation plugins.  The recommended one that this guide focused on is the +validation_helpers+ plugin.  However, Sequel also ships with the +validation_class_methods+ plugin, which uses class methods instead of instance methods to define validations.  It exists mostly for legacy compatibility, but it is still supported.
+=== +constraint_validations+
+
+Sequel ships with a +constraint_validations+ plugin and extension, that allows you to setup constraints when creating your database tables, and have Model validations automatically created that mirror those constraints.
+
+=== +auto_validations+
+
+Autovalidations uses the not null and type information obtained from parsing the database schema, and the unique index information from parsing the database's index information, and automatically setting up not_null, schema_types, and unique validations.  If you don't require customizing validation messages on a per-column basis, it can DRY up a lot of validation code.
+
+=== +validation_class_methods+
+
+Sequel ships with the +validation_class_methods+ plugin, which uses class methods instead of instance methods to define validations.  It exists mostly for legacy compatibility, but it is still supported.
+

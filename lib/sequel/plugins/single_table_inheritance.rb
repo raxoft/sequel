@@ -24,7 +24,15 @@ module Sequel
     #
     #   # Use the default of storing the class name in the sti_key
     #   # column (:kind in this case)
-    #   Employee.plugin :single_table_inheritance, :kind
+    #   class Employee < Sequel::Model
+    #     plugin :single_table_inheritance, :kind
+    #   end
+    #
+    #   # Have subclasses inherit from the appropriate class
+    #   class Staff < Employee; end
+    #   class Manager < Employee; end
+    #
+    #   # You can also use many different options to configure the plugin:
     #
     #   # Using integers to store the class type, with a :model_map hash
     #   # and an sti_key of :type
@@ -51,7 +59,7 @@ module Sequel
     #   # and :key_map taking a class object and returning the column
     #   # value to use
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>proc{|v| v.reverse},
+    #     :model_map=>proc(&:reverse),
     #     :key_map=>proc{|klass| klass.name.reverse}
     #
     #   # You can use the same class for multiple values.
@@ -69,7 +77,7 @@ module Sequel
     # as keys.
     module SingleTableInheritance
       # Setup the necessary STI variables, see the module RDoc for SingleTableInheritance
-      def self.configure(model, key, opts={})
+      def self.configure(model, key, opts=OPTS)
         model.instance_eval do
           @sti_key_array = nil
           @sti_key = key 
@@ -77,9 +85,9 @@ module Sequel
           @sti_model_map = opts[:model_map] || lambda{|v| v if v && v != ''}
           @sti_key_map = if km = opts[:key_map]
             if km.is_a?(Hash)
-              h = Hash.new do |h,k| 
+              h = Hash.new do |h1,k| 
                 unless k.is_a?(String)
-                  h[k.to_s]
+                  h1[k.to_s]
                 else
                   []
                 end
@@ -93,9 +101,9 @@ module Sequel
               km
             end
           elsif sti_model_map.is_a?(Hash)
-            h = Hash.new do |h,k| 
+            h = Hash.new do |h1,k| 
               unless k.is_a?(String)
-                h[k.to_s]
+                h1[k.to_s]
               else
                 []
               end
@@ -126,7 +134,7 @@ module Sequel
         attr_reader :sti_key_array
 
         # A hash/proc with class keys and column value values, mapping
-        # the the class to a particular value given to the sti_key column.
+        # the class to a particular value given to the sti_key column.
         # Used to set the column value when creating objects, and for the
         # filter when retrieving objects in subclasses.
         attr_reader :sti_key_map
@@ -139,27 +147,19 @@ module Sequel
         # This defaults to a lookup in the key map.
         attr_reader :sti_key_chooser
 
+        Plugins.inherited_instance_variables(self, :@sti_dataset=>nil, :@sti_key=>nil, :@sti_key_map=>nil, :@sti_model_map=>nil, :@sti_key_chooser=>nil)
+
         # Copy the necessary attributes to the subclasses, and filter the
         # subclass's dataset based on the sti_kep_map entry for the class.
         def inherited(subclass)
           super
-          sk = sti_key
-          sd = sti_dataset
-          skm = sti_key_map
-          smm = sti_model_map
-          skc = sti_key_chooser
-          key = Array(skm[subclass]).dup
+          key = Array(sti_key_map[subclass]).dup
           sti_subclass_added(key)
           rp = dataset.row_proc
-          subclass.set_dataset(sd.filter(SQL::QualifiedIdentifier.new(table_name, sk)=>key), :inherited=>true)
+          subclass.set_dataset(sti_dataset.filter(SQL::QualifiedIdentifier.new(sti_dataset.first_source_alias, sti_key)=>key), :inherited=>true)
           subclass.instance_eval do
             dataset.row_proc = rp
-            @sti_key = sk
             @sti_key_array = key
-            @sti_dataset = sd
-            @sti_key_map = skm
-            @sti_model_map = smm
-            @sti_key_chooser = skc
             self.simple_table = nil
           end
         end
@@ -174,12 +174,19 @@ module Sequel
         # keys for all of their descendant classes.
         def sti_subclass_added(key)
           if sti_key_array
-            Sequel.synchronize{sti_key_array.push(*Array(key))}
+            key_array = Array(key)
+            Sequel.synchronize{sti_key_array.push(*key_array)}
             superclass.sti_subclass_added(key)
           end
         end
 
         private
+
+        # If calling set_dataset manually, make sure to set the dataset
+        # row proc to one that handles inheritance correctly.
+        def set_dataset_row_proc(ds)
+          ds.row_proc = @dataset.row_proc if @dataset
+        end
 
         # Return a class object.  If a class is given, return it directly.
         # Treat strings and symbols as class names.  If nil is given or
@@ -200,9 +207,13 @@ module Sequel
       end
 
       module InstanceMethods
+        private
+
         # Set the sti_key column based on the sti_key_map.
-        def before_create
-          send("#{model.sti_key}=", model.sti_key_chooser.call(self)) unless self[model.sti_key]
+        def _before_validation
+          if new? && model.sti_key && !self[model.sti_key]
+            set_column_value("#{model.sti_key}=", model.sti_key_chooser.call(self))
+          end
           super
         end
       end

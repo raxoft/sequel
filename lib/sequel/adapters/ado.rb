@@ -8,25 +8,6 @@ module Sequel
 
       set_adapter_scheme :ado
 
-      def initialize(opts)
-        super
-        case @opts[:conn_string]
-        when /Microsoft\.(Jet|ACE)\.OLEDB/io
-          Sequel.ts_require 'adapters/ado/access'
-          extend Sequel::ADO::Access::DatabaseMethods
-          @dataset_class = ADO::Access::Dataset
-        else
-          @opts[:driver] ||= 'SQL Server'
-          case @opts[:driver]
-          when 'SQL Server'
-            Sequel.ts_require 'adapters/ado/mssql'
-            extend Sequel::ADO::MSSQL::DatabaseMethods
-            @dataset_class = ADO::MSSQL::Dataset
-            set_mssql_unicode_strings
-          end
-        end
-      end
-
       # In addition to the usual database options,
       # the following options have an effect:
       #
@@ -59,15 +40,17 @@ module Sequel
       
       def disconnect_connection(conn)
         conn.Close
+      rescue WIN32OLERuntimeError
+        nil
       end
 
       # Just execute so it doesn't attempt to return the number of rows modified.
-      def execute_ddl(sql, opts={})
+      def execute_ddl(sql, opts=OPTS)
         execute(sql, opts)
       end
 
       # Just execute so it doesn't attempt to return the number of rows modified.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         execute(sql, opts)
       end
       
@@ -75,7 +58,7 @@ module Sequel
       # unless is a provider is in use (since some providers don't seem to
       # return the number of affected rows, but the default provider appears
       # to).
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         return super if opts[:provider]
         synchronize(opts[:server]) do |conn|
           begin
@@ -87,7 +70,7 @@ module Sequel
         end
       end
 
-      def execute(sql, opts={})
+      def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           begin
             r = log_yield(sql){conn.Execute(sql)}
@@ -98,18 +81,36 @@ module Sequel
         end
         nil
       end
-      alias do execute
 
       private
       
+      def adapter_initialize
+        case @opts[:conn_string]
+        when /Microsoft\.(Jet|ACE)\.OLEDB/io
+          Sequel.require 'adapters/ado/access'
+          extend Sequel::ADO::Access::DatabaseMethods
+          self.dataset_class = ADO::Access::Dataset
+        else
+          @opts[:driver] ||= 'SQL Server'
+          case @opts[:driver]
+          when 'SQL Server'
+            Sequel.require 'adapters/ado/mssql'
+            extend Sequel::ADO::MSSQL::DatabaseMethods
+            self.dataset_class = ADO::MSSQL::Dataset
+            set_mssql_unicode_strings
+          end
+        end
+        super
+      end
+
       # The ADO adapter's default provider doesn't support transactions, since it 
       # creates a new native connection for each query.  So Sequel only attempts
       # to use transactions if an explicit :provider is given.
-      def begin_transaction(conn, opts={})
+      def begin_transaction(conn, opts=OPTS)
         super if @opts[:provider]
       end
 
-      def commit_transaction(conn, opts={})
+      def commit_transaction(conn, opts=OPTS)
         super if @opts[:provider]
       end
 
@@ -121,7 +122,7 @@ module Sequel
         super || (e.is_a?(::WIN32OLERuntimeError) && e.message =~ DISCONNECT_ERROR_RE)
       end
 
-      def rollback_transaction(conn, opts={})
+      def rollback_transaction(conn, opts=OPTS)
         super if @opts[:provider]
       end
     end

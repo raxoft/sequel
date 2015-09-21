@@ -6,7 +6,7 @@
 # unbounded beginnings and endings (which ruby's range does not
 # support).
 #
-# This extension integrates with Sequel's native postgres adapter, so
+# This extension integrates with Sequel's native postgres and jdbc/postgresql adapters, so
 # that when range type values are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::PGRange.  PGRange mostly acts
 # like a Range, but it's not a Range as not all PostgreSQL range
@@ -24,8 +24,8 @@
 #
 #   Sequel.pg_range(range)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Range#pg_range:
 #
 #   range.pg_range 
@@ -45,9 +45,12 @@
 #
 #   DB.extension :pg_range
 #
-# If you are not using the native postgres adapter, you probably
-# also want to use the typecast_on_load plugin in the model, and
-# set it to typecast the range type column(s) on load.
+# If you are not using the native postgres or jdbc/postgresql adapters and are using range
+# types as model column values you probably should use the
+# pg_typecast_on_load plugin if the column values are returned as a string.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using range type columns in CREATE/ALTER TABLE statements.
 #
 # This extension integrates with the pg_array extension.  If you plan
 # to use arrays of range types, load the pg_array extension before the
@@ -68,6 +71,7 @@ module Sequel
 
       EMPTY = 'empty'.freeze
       EMPTY_STRING = ''.freeze
+      COMMA = ','.freeze
       QUOTED_EMPTY_STRING = '""'.freeze
       OPEN_PAREN = "(".freeze
       CLOSE_PAREN = ")".freeze
@@ -88,11 +92,11 @@ module Sequel
       # :oid :: The PostgreSQL OID for the range type.  This is used by the Sequel postgres adapter
       #         to set up automatic type conversion on retrieval from the database.
       # :subtype_oid :: Should be the PostgreSQL OID for the range's subtype. If given,
-      #                automatically sets the :converter option by looking for scalar conversion
-      #                proc.
+      #                 automatically sets the :converter option by looking for scalar conversion
+      #                 proc.
       #
       # If a block is given, it is treated as the :converter option.
-      def self.register(db_type, opts={}, &block)
+      def self.register(db_type, opts=OPTS, &block)
         db_type = db_type.to_s.dup.freeze
 
         if converter = opts[:converter]
@@ -185,7 +189,22 @@ module Sequel
         # Reset the conversion procs if using the native postgres adapter,
         # and extend the datasets to correctly literalize ruby Range values.
         def self.extended(db)
-          db.extend_datasets(DatasetMethods)
+          db.instance_eval do
+            extend_datasets(DatasetMethods)
+            copy_conversion_procs([3904, 3906, 3912, 3926, 3905, 3907, 3913, 3927])
+            [:int4range, :numrange, :tsrange, :tstzrange, :daterange, :int8range].each do |v|
+              @schema_type_classes[v] = PGRange
+            end
+          end
+
+          procs = db.conversion_procs
+          procs[3908] = Parser.new("tsrange", procs[1114])
+          procs[3910] = Parser.new("tstzrange", procs[1184])
+          if defined?(PGArray::Creator)
+            procs[3909] = PGArray::Creator.new("tsrange", procs[3908])
+            procs[3911] = PGArray::Creator.new("tstzrange", procs[3910])
+          end
+
         end
 
         # Define a private range typecasting method for the given type that uses
@@ -313,7 +332,7 @@ module Sequel
       # :empty :: Whether the range is empty (has no points)
       # :exclude_begin :: Whether the beginning element is excluded from the range.
       # :exclude_end :: Whether the ending element is excluded from the range.
-      def initialize(beg, en, opts={})
+      def initialize(beg, en, opts=OPTS)
         @begin = beg
         @end = en
         @empty = !!opts[:empty]
@@ -377,7 +396,9 @@ module Sequel
         end
       end
 
-      # Whether this range is empty (has no points).
+      # Whether this range is empty (has no points).  Note that for manually created ranges
+      # (ones not retrieved from the database), this will only be true if the range
+      # was created using the :empty option.
       def empty?
         @empty
       end
@@ -394,9 +415,19 @@ module Sequel
 
       # Append a literalize version of the receiver to the sql.
       def sql_literal_append(ds, sql)
-        ds.literal_append(sql, unquoted_literal(ds))
-        if s = @db_type
-          sql << CAST << s.to_s
+        if (s = @db_type) && !empty?
+          sql << s.to_s << OPEN_PAREN
+          ds.literal_append(sql, self.begin)
+          sql << COMMA
+          ds.literal_append(sql, self.end)
+          sql << COMMA
+          ds.literal_append(sql, "#{exclude_begin? ? OPEN_PAREN : OPEN_BRACKET}#{exclude_end? ? CLOSE_PAREN : CLOSE_BRACKET}")
+          sql << CLOSE_PAREN
+        else
+          ds.literal_append(sql, unquoted_literal(ds))
+          if s
+            sql << CAST << s.to_s
+          end
         end
       end
 

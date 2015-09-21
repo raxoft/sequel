@@ -1,12 +1,21 @@
+Sequel::DataObjects.load_driver 'do_mysql'
 Sequel.require 'adapters/shared/mysql'
 
 module Sequel
   module DataObjects
+    Sequel.synchronize do
+      DATABASE_SETUP[:mysql] = proc do |db|
+        db.extend(Sequel::DataObjects::MySQL::DatabaseMethods)
+        db.dataset_class = Sequel::DataObjects::MySQL::Dataset
+      end
+    end
+
     # Database and Dataset instance methods for MySQL specific
     # support via DataObjects.
     module MySQL
       # Database instance methods for MySQL databases accessed via DataObjects.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::MySQL::DatabaseMethods
         
         private

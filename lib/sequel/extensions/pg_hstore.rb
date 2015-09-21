@@ -3,12 +3,12 @@
 # the hstore type stores an arbitrary key-value table, where the keys
 # are strings and the values are strings or NULL.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when hstore fields are retrieved, they are parsed and returned
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when hstore fields are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::HStore.  HStore is
 # a DelegateClass of Hash, so it mostly acts like a hash, but not
 # completely (is_a?(Hash) is false).  If you want the actual hash,
-# you can call Hstore#to_hash.  This is done so that Sequel does not
+# you can call HStore#to_hash.  This is done so that Sequel does not
 # treat a HStore like a Hash by default, which would cause issues.
 #
 # In addition to the parsers, this extension comes with literalizers
@@ -19,8 +19,8 @@
 #
 #   Sequel.hstore(hash)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Hash#hstore:
 # 
 #   hash.hstore
@@ -28,16 +28,16 @@
 # Since the hstore type only supports strings, non string keys and
 # values are converted to strings
 #
-#   {:foo=>1}.hstore.to_hash # {'foo'=>'1'}
-#   v = {}.hstore
+#   Sequel.hstore(:foo=>1).to_hash # {'foo'=>'1'}
+#   v = Sequel.hstore({})
 #   v[:foo] = 1
 #   v # {'foo'=>'1'}
 #
 # However, to make life easier, lookups by key are converted to
 # strings (even when accessing the underlying hash directly):
 #
-#   {'foo'=>'bar'}.hstore[:foo] # 'bar'
-#   {'foo'=>'bar'}.hstore.to_hash[:foo] # 'bar'
+#   Sequel.hstore('foo'=>'bar')[:foo] # 'bar'
+#   Sequel.hstore('foo'=>'bar').to_hash[:foo] # 'bar'
 # 
 # HStore instances mostly just delegate to the underlying hash
 # instance, so Hash methods that modify the receiver or returned
@@ -66,7 +66,7 @@
 #
 # If you want to insert a hash into an hstore database column:
 #
-#   DB[:table].insert(:column=>{'foo'=>'bar'}.hstore)
+#   DB[:table].insert(:column=>Sequel.hstore('foo'=>'bar'))
 #
 # If you would like to use hstore columns in your model objects, you
 # probably want to modify the schema parsing/typecasting so that it
@@ -75,9 +75,12 @@
 #
 #   DB.extension :pg_hstore
 #
-# If you are not using the native postgres adapter, you probably
-# also want to use the typecast_on_load plugin in the model, and
-# set it to typecast the hstore column(s) on load.
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using hstore columns in CREATE/ALTER TABLE statements.
+#
+# If you are not using the native postgres or jdbc/postgresql adapters and are using hstore
+# types as model column values you probably should use the
+# pg_typecast_on_load plugin if the column values are returned as a string.
 #
 # This extension requires the delegate and strscan libraries.
 
@@ -136,6 +139,13 @@ module Sequel
       end
 
       module DatabaseMethods
+        def self.extended(db)
+          db.instance_eval do
+            add_named_conversion_proc(:hstore)
+            @schema_type_classes[:hstore] = HStore
+          end
+        end
+
         # Handle hstores in bound variables
         def bound_variable_arg(arg, conn)
           case arg

@@ -3,6 +3,8 @@ Sequel.require 'adapters/utils/split_alter_table'
 module Sequel
   module Cubrid
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       include Sequel::Database::SplitAlterTable
 
       AUTOINCREMENT = 'AUTO_INCREMENT'.freeze
@@ -12,7 +14,7 @@ module Sequel
         :cubrid
       end
 
-      def indexes(table, opts={})
+      def indexes(table, opts=OPTS)
         m = output_identifier_meth
         m2 = input_identifier_meth
         indexes = {}
@@ -49,21 +51,22 @@ module Sequel
           from(:db_attribute).
           where(:class_name=>m2.call(table_name)).
           order(:def_order).
-          select(:attr_name, :data_type___db_type, :default_value___default, :is_nullable___allow_null).
+          select(:attr_name, :data_type___db_type, :default_value___default, :is_nullable___allow_null, :prec).
           map do |row|
             name = m.call(row.delete(:attr_name))
             row[:allow_null] = row[:allow_null] == 'YES'
             row[:primary_key] = pks.include?(name)
             row[:type] = schema_column_type(row[:db_type])
+            row[:max_length] = row[:prec] if row[:type] == :string
             [name, row]
           end
       end
 
-      def tables(opts={})
+      def tables(opts=OPTS)
         _tables('CLASS')
       end
 
-      def views(opts={})
+      def views(opts=OPTS)
         _tables('VCLASS')
       end
 
@@ -78,24 +81,24 @@ module Sequel
           map{|c| m.call(c)}
       end
 
-      def alter_table_op_sql(table, op)
-        case op[:op]
-        when :rename_column
-          "RENAME COLUMN #{quote_identifier(op[:name])} AS #{quote_identifier(op[:new_name])}"
-        when :set_column_type, :set_column_null, :set_column_default
-          o = op[:op]
-          opts = schema(table).find{|x| x.first == op[:name]}
-          opts = opts ? opts.last.dup : {}
-          opts[:name] = o == :rename_column ? op[:new_name] : op[:name]
-          opts[:type] = o == :set_column_type ? op[:type] : opts[:db_type]
-          opts[:null] = o == :set_column_null ? op[:null] : opts[:allow_null]
-          opts[:default] = o == :set_column_default ? op[:default] : opts[:ruby_default]
-          opts.delete(:default) if opts[:default] == nil
-          "CHANGE COLUMN #{quote_identifier(op[:name])} #{column_definition_sql(op.merge(opts))}"
-        else
-          super
-        end
+      def alter_table_rename_column_sql(table, op)
+        "RENAME COLUMN #{quote_identifier(op[:name])} AS #{quote_identifier(op[:new_name])}"
       end
+
+      def alter_table_change_column_sql(table, op)
+        o = op[:op]
+        opts = schema(table).find{|x| x.first == op[:name]}
+        opts = opts ? opts.last.dup : {}
+        opts[:name] = o == :rename_column ? op[:new_name] : op[:name]
+        opts[:type] = o == :set_column_type ? op[:type] : opts[:db_type]
+        opts[:null] = o == :set_column_null ? op[:null] : opts[:allow_null]
+        opts[:default] = o == :set_column_default ? op[:default] : opts[:ruby_default]
+        opts.delete(:default) if opts[:default] == nil
+        "CHANGE COLUMN #{quote_identifier(op[:name])} #{column_definition_sql(op.merge(opts))}"
+      end
+      alias alter_table_set_column_type_sql alter_table_change_column_sql
+      alias alter_table_set_column_null_sql alter_table_change_column_sql
+      alias alter_table_set_column_default_sql alter_table_change_column_sql
 
       def alter_table_sql(table, op)
         case op[:op]
@@ -146,6 +149,11 @@ module Sequel
         nil
       end
 
+      # CUBRID does not support named column constraints.
+      def supports_named_column_constraints?
+        false
+      end
+
       # CUBRID doesn't support booleans, it recommends using smallint.
       def type_literal_generic_trueclass(column)
         :smallint
@@ -155,14 +163,21 @@ module Sequel
       def uses_clob_for_text?
         true
       end
+
+      # CUBRID supports views with check option, but not local.
+      def view_with_check_option_support
+        true
+      end
     end
     
     module DatasetMethods
-      SELECT_CLAUSE_METHODS = Sequel::Dataset.clause_methods(:select, %w'select distinct columns from join where group having compounds order limit')
-      LIMIT = Sequel::Dataset::LIMIT
       COMMA = Sequel::Dataset::COMMA
+      LIMIT = Sequel::Dataset::LIMIT
       BOOL_FALSE = '0'.freeze
       BOOL_TRUE = '1'.freeze
+
+      # Hope you don't have more than 2**32 + offset rows in your dataset
+      ONLY_OFFSET = ",4294967295".freeze
 
       def supports_join_using?
         false
@@ -193,22 +208,35 @@ module Sequel
         BOOL_TRUE
       end
      
-      # CUBRID doesn't support CTEs or FOR UPDATE.
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
+      # CUBRID supports multiple rows in INSERT.
+      def multi_insert_sql_strategy
+        :values
       end
 
       # CUBRID requires a limit to use an offset,
       # and requires a FROM table if a limit is used.
       def select_limit_sql(sql)
-        if @opts[:from] && (l = @opts[:limit])
+        return unless @opts[:from]
+        l = @opts[:limit]
+        o = @opts[:offset]
+        if l || o
           sql << LIMIT
-          if o = @opts[:offset]
+          if o
             literal_append(sql, o)
-            sql << COMMA
+            if l
+              sql << COMMA
+              literal_append(sql, l)
+            else
+              sql << ONLY_OFFSET
+            end
+          else
+            literal_append(sql, l)
           end
-          literal_append(sql, l)
         end
+      end
+
+      # CUBRID doesn't support FOR UPDATE.
+      def select_lock_sql(sql)
       end
     end
   end

@@ -33,7 +33,7 @@ module Sequel
       when SQL::OrderedExpression
         SQL::OrderedExpression.new(v(o.expression), o.descending, :nulls=>o.nulls)
       when SQL::AliasedExpression
-        SQL::AliasedExpression.new(v(o.expression), o.aliaz)
+        SQL::AliasedExpression.new(v(o.expression), o.alias, o.columns)
       when SQL::CaseExpression
         args = [v(o.conditions), v(o.default)]
         args << v(o.expression) if o.expression?
@@ -41,11 +41,13 @@ module Sequel
       when SQL::Cast
         SQL::Cast.new(v(o.expr), o.type)
       when SQL::Function
-        SQL::Function.new(o.f, *v(o.args))
+        h = {}
+        o.opts.each do |k, val|
+          h[k] = v(val)
+        end
+        SQL::Function.new!(o.name, v(o.args), h)
       when SQL::Subscript
         SQL::Subscript.new(v(o.f), v(o.sub))
-      when SQL::WindowFunction
-        SQL::WindowFunction.new(v(o.function), v(o.window))
       when SQL::Window
         opts = o.opts.dup
         opts[:partition] = v(opts[:partition]) if opts[:partition]
@@ -61,11 +63,13 @@ module Sequel
         end
         SQL::PlaceholderLiteralString.new(o.str, args, o.parens)
       when SQL::JoinOnClause
-        SQL::JoinOnClause.new(v(o.on), o.join_type, v(o.table), v(o.table_alias))
+        SQL::JoinOnClause.new(v(o.on), o.join_type, v(o.table_expr))
       when SQL::JoinUsingClause
-        SQL::JoinUsingClause.new(v(o.using), o.join_type, v(o.table), v(o.table_alias))
+        SQL::JoinUsingClause.new(v(o.using), o.join_type, v(o.table_expr))
       when SQL::JoinClause
-        SQL::JoinClause.new(o.join_type, v(o.table), v(o.table_alias))
+        SQL::JoinClause.new(o.join_type, v(o.table_expr))
+      when SQL::DelayedEvaluation
+        SQL::DelayedEvaluation.new(lambda{|ds| v(o.call(ds))})
       when SQL::Wrapper
         SQL::Wrapper.new(v(o.value))
       else
@@ -157,8 +161,10 @@ module Sequel
     # an instance of one of the +UNBIND_KEY_CLASSES+.
     def bind_key(obj)
       case obj
-      when Symbol, String
+      when Symbol
         obj
+      when String
+        obj.to_sym
       when SQL::Identifier
         bind_key(obj.value)
       when SQL::QualifiedIdentifier

@@ -1,12 +1,16 @@
 module Sequel
   module Plugins
-    # DefaultsSetter is a simple plugin that sets non-nil/NULL default values upon
-    # initialize:
+    # The defaults_setter plugin makes the column getter methods return the default
+    # values for new objects, if the values have not already been set.  Example:
     #
     #   # column a default NULL
     #   # column b default 2
-    #   album = Album.new.values # {:b => 2}
-    #   album = Album.new(:a=>1, :b=>3).values # {:a => 1, :b => 3}
+    #   album = Album.new
+    #   album.a # => nil
+    #   album.b # => 2
+    #   album = Album.new(:a=>1, :b=>3)
+    #   album.a # => 1
+    #   album.b # => 3
     # 
     # Usage:
     #
@@ -28,12 +32,7 @@ module Sequel
         # this hash to set specific default values, by default the ones will be parsed from the database.
         attr_reader :default_values
         
-        # Set the default values when loading the dataset.
-        def set_dataset(*)
-          x = super
-          set_default_values
-          x
-        end
+        Plugins.after_set_dataset(self, :set_default_values)
 
         private
 
@@ -51,7 +50,7 @@ module Sequel
           when Sequel::CURRENT_DATE
             lambda{Date.today}
           when Sequel::CURRENT_TIMESTAMP
-            lambda{Sequel.datetime_class.now}
+            lambda{dataset.current_datetime}
           else
             v
           end
@@ -59,12 +58,14 @@ module Sequel
       end
 
       module InstanceMethods
-        private
-
-        # Set default values if they are not already set by the hash provided to initialize.
-        def initialize_set(h)
-          super
-          model.default_values.each{|k,v| self[k] = (v.respond_to?(:call) ? v.call : v) unless values.has_key?(k)}
+        # Use default value for a new record if values doesn't already contain an entry for it.
+        def [](k)
+          if new? && !values.has_key?(k)
+            v = model.default_values[k]
+            v.respond_to?(:call) ? v.call : v
+          else
+            super
+          end
         end
       end
     end

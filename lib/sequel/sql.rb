@@ -48,6 +48,17 @@ module Sequel
       t = now
       local(t.year, t.month, t.day, hour, minute, second, usec)
     end
+
+    # Return a string in HH:MM:SS format representing the time.
+    def to_s(*args)
+      if args.empty?
+        strftime('%H:%M:%S')
+      else
+        # Superclass may have defined a method that takes a format string,
+        # and we shouldn't override in that case.
+        super
+      end
+    end
   end
 
   # The SQL module holds classes whose instances represent SQL fragments.
@@ -89,8 +100,10 @@ module Sequel
         # Create a to_s instance method that takes a dataset, and calls
         # the method provided on the dataset with args as the argument (self by default).
         # Used to DRY up some code.
+        #
+        # Do not call this method with untrusted input, as that can result in
+        # arbitrary code execution.
         def to_s_method(meth, args=:self) # :nodoc:
-          class_eval("def to_s(ds) ds.#{meth}(#{args}) end", __FILE__, __LINE__)
           class_eval("def to_s_append(ds, sql) ds.#{meth}_append(sql, #{args}) end", __FILE__, __LINE__)
         end
       end
@@ -124,7 +137,9 @@ module Sequel
       
       # Alias of +to_s+
       def sql_literal(ds)
-        to_s(ds)
+        s = ''
+        to_s_append(ds, s)
+        s
       end
     end
 
@@ -201,7 +216,7 @@ module Sequel
         case op
         when *N_ARITY_OPERATORS
           raise(Error, "The #{op} operator requires at least 1 argument") unless args.length >= 1
-          old_args = args
+          old_args = args.map{|a| a.is_a?(self.class) && a.op == :NOOP ? a.args.first : a}
           args = []
           old_args.each{|a| a.is_a?(self.class) && a.op == op ? args.concat(a.args) : args.push(a)}
         when *TWO_ARITY_OPERATORS
@@ -236,8 +251,9 @@ module Sequel
       # Create an SQL alias (+AliasedExpression+) of the receiving column or expression to the given alias.
       #
       #   Sequel.function(:func).as(:alias) # func() AS "alias"
-      def as(aliaz)
-        AliasedExpression.new(self, aliaz)
+      #   Sequel.function(:func).as(:alias, [:col_alias1, :col_alias2]) # func() AS "alias"("col_alias1", "col_alias2")
+      def as(aliaz, columns=nil)
+        AliasedExpression.new(self, aliaz, columns)
       end
     end
 
@@ -305,8 +321,9 @@ module Sequel
       # Create an SQL::AliasedExpression for the given expression and alias.
       #
       #   Sequel.as(:column, :alias) # "column" AS "alias"
-      def as(exp, aliaz)
-        SQL::AliasedExpression.new(exp, aliaz)
+      #   Sequel.as(:column, :alias, [:col_alias1, :col_alias2]) # "column" AS "alias"("col_alias1", "col_alias2")
+      def as(exp, aliaz, columns=nil)
+        SQL::AliasedExpression.new(exp, aliaz, columns)
       end
 
       # Order the given argument ascending.
@@ -318,7 +335,7 @@ module Sequel
       #
       #   Sequel.asc(:a) # a ASC
       #   Sequel.asc(:b, :nulls=>:last) # b ASC NULLS LAST
-      def asc(arg, opts={})
+      def asc(arg, opts=OPTS)
         SQL::OrderedExpression.new(arg, false, opts)
       end
 
@@ -376,7 +393,17 @@ module Sequel
       #   Sequel.char_length(:a) # char_length(a) -- Most databases
       #   Sequel.char_length(:a) # length(a) -- SQLite
       def char_length(arg)
-        SQL::EmulatedFunction.new(:char_length, arg)
+        SQL::Function.new!(:char_length, [arg], :emulate=>true)
+      end
+
+      # Do a deep qualification of the argument using the qualifier.  This recurses into
+      # nested structures.
+      #
+      #   Sequel.deep_qualify(:table, :column) # "table"."column"
+      #   Sequel.deep_qualify(:table, Sequel.+(:column, 1)) # "table"."column" + 1
+      #   Sequel.deep_qualify(:table, Sequel.like(:a, 'b')) # "table"."a" LIKE 'b' ESCAPE '\'
+      def deep_qualify(qualifier, expr)
+        Sequel::Qualifier.new(Sequel, qualifier).transform(expr)
       end
 
       # Return a delayed evaluation that uses the passed block. This is used
@@ -409,7 +436,7 @@ module Sequel
       #
       #   Sequel.desc(:a) # b DESC
       #   Sequel.desc(:b, :nulls=>:first) # b DESC NULLS FIRST
-      def desc(arg, opts={})
+      def desc(arg, opts=OPTS)
         SQL::OrderedExpression.new(arg, true, opts)
       end
 
@@ -530,7 +557,7 @@ module Sequel
       # Create a <tt>BooleanExpression</tt> case insensitive (if the database supports it) pattern match of the receiver with
       # the given patterns.  See <tt>SQL::StringExpression.like</tt>.
       #
-      #   Sequel.ilike(:a, 'A%') # "a" ILIKE 'A%'
+      #   Sequel.ilike(:a, 'A%') # "a" ILIKE 'A%' ESCAPE '\'
       def ilike(*args)
         SQL::StringExpression.like(*(args << {:case_insensitive=>true}))
       end
@@ -538,7 +565,7 @@ module Sequel
       # Create a <tt>SQL::BooleanExpression</tt> case sensitive (if the database supports it) pattern match of the receiver with
       # the given patterns.  See <tt>SQL::StringExpression.like</tt>.
       #
-      #   Sequel.like(:a, 'A%') # "a" LIKE 'A%'
+      #   Sequel.like(:a, 'A%') # "a" LIKE 'A%' ESCAPE '\'
       def like(*args)
         SQL::StringExpression.like(*args)
       end
@@ -611,6 +638,8 @@ module Sequel
       #   Sequel.subscript(:array, 1) # array[1]
       #   Sequel.subscript(:array, 1, 2) # array[1, 2]
       #   Sequel.subscript(:array, [1, 2]) # array[1, 2]
+      #   Sequel.subscript(:array, 1..2) # array[1:2]
+      #   Sequel.subscript(:array, 1...3) # array[1:2]
       def subscript(exp, *subs)
         SQL::Subscript.new(exp, subs.flatten)
       end
@@ -621,7 +650,7 @@ module Sequel
       #   Sequel.trim(:a) # trim(a) -- Most databases
       #   Sequel.trim(:a) # ltrim(rtrim(a)) -- Microsoft SQL Server
       def trim(arg)
-        SQL::EmulatedFunction.new(:trim, arg)
+        SQL::Function.new!(:trim, [arg], :emulate=>true)
       end
 
       # Return a <tt>SQL::ValueList</tt> created from the given array.  Used if the array contains
@@ -730,10 +759,6 @@ module Sequel
       end
     end
 
-    # Only exists for backwards compatibility, ignore it.
-    module NoBooleanInputMethods
-    end
-
     # This module includes the standard mathematical methods (+, -, *, and /)
     # that are defined on objects that can be used in a numeric context in SQL
     # (+Symbol+, +LiteralString+, and +SQL::GenericExpression+).
@@ -766,6 +791,38 @@ module Sequel
       end
     end
 
+    # This module includes methods for overriding the =~ method for SQL equality,
+    # inclusion, and pattern matching.  It returns the same result that Sequel would
+    # return when using a hash with a single entry, where the receiver was the key
+    # and the argument was the value. Example:
+    #
+    #   Sequel.expr(:a) =~ 1 # (a = 1)
+    #   Sequel.expr(:a) =~ [1, 2] # (a IN [1, 2])
+    #   Sequel.expr(:a) =~ nil # (a IS NULL)
+    #
+    # On Ruby 1.9+, this also adds the !~ method, for easily setting up not equals,
+    # exclusion, and inverse pattern matching.  This is the same as as inverting the
+    # result of the =~ method
+    #
+    #   Sequel.expr(:a) !~ 1 # (a != 1)
+    #   Sequel.expr(:a) !~ [1, 2] # (a NOT IN [1, 2])
+    #   Sequel.expr(:a) !~ nil # (a IS NOT NULL)
+    module PatternMatchMethods
+      # Set up an equality, inclusion, or pattern match operation, based on the type
+      # of the argument.
+      def =~(other)
+        BooleanExpression.send(:from_value_pair, self, other)
+      end
+
+      if RUBY_VERSION >= '1.9'
+        module_eval(<<-END, __FILE__, __LINE__+1)
+          def !~(other)
+            ~(self =~ other)
+          end
+        END
+      end
+    end
+
     # These methods are designed as replacements for the core extension operator
     # methods, so that Sequel is still easy to use if the core extensions are not
     # enabled.
@@ -775,20 +832,23 @@ module Sequel
     # arguments with the appropriate operator, and the & and | operators return
     # boolean expressions combining all of the arguments with either AND or OR.
     module OperatorBuilders
-      %w'+ - * /'.each do |op|
-        class_eval(<<-END, __FILE__, __LINE__ + 1)
-          def #{op}(*args)
-            SQL::NumericExpression.new(:#{op}, *args)
-          end
-        END
-      end
-
-      {'&'=>'AND', '|'=>'OR'}.each do |m, op|
-        class_eval(<<-END, __FILE__, __LINE__ + 1)
-          def #{m}(*args)
-            SQL::BooleanExpression.new(:#{op}, *args)
-          end
-        END
+      {'::Sequel::SQL::NumericExpression'=>{'+'=>'+', '-'=>'-', '*'=>'*', '/'=>'/'},
+       '::Sequel::SQL::BooleanExpression'=>{'&'=>'AND', '|'=>'OR'}}.each do |klass, ops|
+        ops.each do |m, op|
+          class_eval(<<-END, __FILE__, __LINE__ + 1)
+            def #{m}(*args)
+              if (args.length == 1)
+                if (v = args.first).class.is_a?(#{klass})
+                  v
+                else
+                  #{klass}.new(:NOOP, v)
+                end
+              else
+                #{klass}.new(:#{op}, *args)
+              end
+            end
+          END
+        end
       end
       
       # Invert the given expression.  Returns a <tt>Sequel::SQL::BooleanExpression</tt>
@@ -815,7 +875,7 @@ module Sequel
       # :nulls :: Set to :first to use NULLS FIRST (so NULL values are ordered
       #           before other values), or :last to use NULLS LAST (so NULL values
       #           are ordered after other values).
-      def asc(opts={})
+      def asc(opts=OPTS)
         OrderedExpression.new(self, false, opts)
       end
       
@@ -825,7 +885,7 @@ module Sequel
       # :nulls :: Set to :first to use NULLS FIRST (so NULL values are ordered
       #           before other values), or :last to use NULLS LAST (so NULL values
       #           are ordered after other values).
-      def desc(opts={})
+      def desc(opts=OPTS)
         OrderedExpression.new(self, true, opts)
       end
     end
@@ -861,7 +921,7 @@ module Sequel
       # Create a +BooleanExpression+ case insensitive pattern match of the receiver
       # with the given patterns.  See <tt>StringExpression.like</tt>.
       #
-      #   :a.ilike('A%') # "a" ILIKE 'A%'
+      #   :a.ilike('A%') # "a" ILIKE 'A%' ESCAPE '\'
       def ilike(*ces)
         StringExpression.like(self, *(ces << {:case_insensitive=>true}))
       end
@@ -869,7 +929,7 @@ module Sequel
       # Create a +BooleanExpression+ case sensitive (if the database supports it) pattern match of the receiver with
       # the given patterns.  See <tt>StringExpression.like</tt>.
       #
-      #   :a.like('A%') # "a" LIKE 'A%'
+      #   :a.like('A%') # "a" LIKE 'A%' ESCAPE '\'
       def like(*ces)
         StringExpression.like(self, *ces)
       end
@@ -881,7 +941,7 @@ module Sequel
       # Return a +StringExpression+ representing the concatenation of the receiver
       # with the given argument.
       #
-      #   :x.sql_string + :y => # "x" || "y"
+      #   :x.sql_string + :y # => "x" || "y"
       def +(ce)
         StringExpression.new(:'||', self, ce)
       end
@@ -895,6 +955,8 @@ module Sequel
       #   :array.sql_subscript(1) # array[1]
       #   :array.sql_subscript(1, 2) # array[1, 2]
       #   :array.sql_subscript([1, 2]) # array[1, 2]
+      #   :array.sql_subscript(:array, 1..2) # array[1:2]
+      #   :array.sql_subscript(:array, 1...3) # array[1:2]
       def sql_subscript(*sub)
         Subscript.new(self, sub.flatten)
       end
@@ -910,10 +972,17 @@ module Sequel
       # The alias to use for the expression, not +alias+ since that is
       # a keyword in ruby.
       attr_reader :aliaz
+      alias_method :alias, :aliaz
+
+      # The columns aliases to use, for when the aliased expression is
+      # a record or set of records (such as a dataset). 
+      attr_reader :columns
 
       # Create an object with the given expression and alias.
-      def initialize(expression, aliaz)
-        @expression, @aliaz = expression, aliaz
+      def initialize(expression, aliaz, columns=nil)
+        @expression = expression
+        @aliaz = aliaz
+        @columns = columns
       end
 
       to_s_method :aliased_expression_sql
@@ -947,14 +1016,14 @@ module Sequel
       # and converts it to a +BooleanExpression+.  The operator and args
       # used depends on the case of the right (2nd) argument:
       #
-      # * 0..10 - left >= 0 AND left <= 10
-      # * [1,2] - left IN (1,2)
-      # * nil - left IS NULL
-      # * true - left IS TRUE 
-      # * false - left IS FALSE 
-      # * /as/ - left ~ 'as'
-      # * :blah - left = blah
-      # * 'blah' - left = 'blah'
+      # 0..10 :: left >= 0 AND left <= 10
+      # [1,2] :: left IN (1,2)
+      # nil :: left IS NULL
+      # true :: left IS TRUE 
+      # false :: left IS FALSE 
+      # /as/ :: left ~ 'as'
+      # :blah :: left = blah
+      # 'blah' :: left = 'blah'
       #
       # If multiple arguments are given, they are joined with the op given (AND
       # by default, OR possible).  If negate is set to true,
@@ -985,7 +1054,9 @@ module Sequel
         when Regexp
           StringExpression.like(l, r)
         when DelayedEvaluation
-          Sequel.delay{from_value_pair(l, r.callable.call)}
+          Sequel.delay{|ds| from_value_pair(l, r.call(ds))}
+        when Dataset::PlaceholderLiteralizer::Argument
+          r.transform{|v| from_value_pair(l, v)}
         else
           new(:'=', l, r)
         end
@@ -1107,6 +1178,7 @@ module Sequel
       include AliasMethods
       include CastMethods
       include OrderMethods
+      include PatternMatchMethods
       include SubscriptMethods
 
       # Return a BooleanExpression with the same op and args.
@@ -1181,31 +1253,136 @@ module Sequel
         @callable = callable
       end
 
-      to_s_method :delayed_evaluation_sql, '@callable'
+      # Call the underlying callable and return the result.  If the
+      # underlying callable only accepts a single argument, call it
+      # with the given dataset.
+      def call(ds)
+        if @callable.respond_to?(:arity) && @callable.arity == 1
+          @callable.call(ds)
+        else
+          @callable.call
+        end
+      end
+
+      to_s_method :delayed_evaluation_sql
     end
 
     # Represents an SQL function call.
     class Function < GenericExpression
+      WILDCARD = LiteralString.new('*').freeze
+      DISTINCT = ["DISTINCT ".freeze].freeze
+      COMMA_ARRAY = [LiteralString.new(', ').freeze].freeze
+
       # The SQL function to call
-      attr_reader :f
+      attr_reader :name
+      alias f name
       
       # The array of arguments to pass to the function (may be blank)
       attr_reader :args
 
-      # Set the functions and args to the given arguments
-      def initialize(f, *args)
-        @f, @args = f, args
+      # Options for this function
+      attr_reader :opts
+
+      # Set the name and args for the function
+      def initialize(name, *args)
+        @name = name
+        @args = args
+        @opts = OPTS
+      end
+
+      def self.new!(name, args, opts)
+        f = new(name, *args)
+        f.instance_variable_set(:@opts, opts)
+        f
+      end
+
+      # If no arguments are given, return a new function with the wildcard prepended to the arguments.
+      #
+      #   Sequel.function(:count).*  # count(*)
+      def *(ce=(arg=false;nil))
+        if arg == false
+          raise Error, "Cannot apply * to functions with arguments" unless args.empty?
+          with_opts(:"*"=>true)
+        else
+          super(ce)
+        end
+      end
+
+      # Return a new function with DISTINCT before the method arguments.
+      #
+      #   Sequel.function(:count, :col).distinct # count(DISTINCT col)
+      def distinct
+        with_opts(:distinct=>true)
+      end
+
+      # Return a new function with FILTER added to it, for filtered
+      # aggregate functions:
+      #
+      #   Sequel.function(:foo, :col).filter(:a=>1) # foo(col) FILTER (WHERE a = 1)
+      def filter(*args, &block)
+        args = args.first if args.length == 1
+        with_opts(:filter=>args, :filter_block=>block)
+      end
+
+      # Return a function which will use LATERAL when literalized:
+      #
+      #   Sequel.function(:foo, :col).lateral # LATERAL foo(col)
+      def lateral
+        with_opts(:lateral=>true)
+      end
+
+      # Return a new function with an OVER clause (making it a window function).
+      #
+      #   Sequel.function(:row_number).over(:partition=>:col) # row_number() OVER (PARTITION BY col)
+      def over(window=OPTS)
+        raise Error, "function already has a window applied to it" if opts[:over]
+        window = Window.new(window) unless window.is_a?(Window)
+        with_opts(:over=>window)
+      end
+
+      # Return a new function where the function name will be quoted if the database supports
+      # quoted functions:
+      #
+      #   Sequel.function(:foo).quoted # "foo"()
+      def quoted
+        with_opts(:quoted=>true)
+      end
+
+      # Return a new function where the function name will not be quoted even
+      # if the database supports quoted functions:
+      #
+      #   Sequel.expr(:foo).function.unquoted # foo()
+      def unquoted
+        with_opts(:quoted=>false)
+      end
+
+      # Return a new function that will use WITH ORDINALITY to also return
+      # a row number for every row the function returns:
+      #
+      #   Sequel.function(:foo).with_ordinality # foo() WITH ORDINALITY
+      def with_ordinality
+        with_opts(:with_ordinality=>true)
+      end
+
+      # Return a new function that uses WITHIN GROUP ordered by the given expression,
+      # useful for ordered-set and hypothetical-set aggregate functions:
+      #
+      #   Sequel.function(:rank, :a).within_group(:b, :c)
+      #   # rank(a) WITHIN GROUP (ORDER BY b, c)
+      def within_group(*expressions)
+        with_opts(:within_group=>expressions)
       end
 
       to_s_method :function_sql
+
+      private
+
+      # Return a new function call with the given opts merged into the current opts.
+      def with_opts(opts)
+        self.class.new!(name, args, Hash[@opts].merge!(opts))
+      end
     end
 
-    # Represents an SQL function call that is translated/emulated
-    # on databases that lack support for such a function.
-    class EmulatedFunction < Function
-      to_s_method :emulated_function_sql
-    end
-    
     class GenericExpression
       include AliasMethods
       include BooleanMethods
@@ -1214,6 +1391,7 @@ module Sequel
       include InequalityMethods
       include NumericMethods
       include OrderMethods
+      include PatternMatchMethods
       include StringMethods
       include SubscriptMethods
     end
@@ -1231,6 +1409,12 @@ module Sequel
       def initialize(value)
         @value = value
       end
+
+      # Create a Function using this identifier as the functions name, with
+      # the given args.
+      def function(*args)
+        Function.new(self, *args)
+      end
       
       to_s_method :quote_identifier, '@value'
     end
@@ -1240,15 +1424,39 @@ module Sequel
       # The type of join to do
       attr_reader :join_type
 
-      # The actual table to join
-      attr_reader :table
+      # The expression representing the table/set related to the JOIN.
+      # Is an AliasedExpression if the JOIN uses an alias.
+      attr_reader :table_expr
 
-      # The table alias to use for the join, if any
-      attr_reader :table_alias
+      # Create an object with the given join_type and table expression.
+      def initialize(join_type, table_expr)
+        @join_type = join_type
+        @table_expr = table_expr
+      end
 
-      # Create an object with the given join_type, table, and table alias
-      def initialize(join_type, table, table_alias = nil)
-        @join_type, @table, @table_alias = join_type, table, table_alias
+      # The table/set related to the JOIN, without any alias.
+      def table
+        if @table_expr.is_a?(AliasedExpression)
+          @table_expr.expression
+        else
+          @table_expr
+        end
+      end
+
+      # The table alias to use for the JOIN , or nil if the
+      # JOIN does not alias the table.
+      def table_alias
+        if @table_expr.is_a?(AliasedExpression)
+          @table_expr.alias
+        end
+      end
+
+      # The column aliases to use for the JOIN , or nil if the
+      # JOIN does not use a derived column list.
+      def column_aliases
+        if @table_expr.is_a?(AliasedExpression)
+          @table_expr.columns
+        end
       end
 
       to_s_method :join_clause_sql
@@ -1348,7 +1556,7 @@ module Sequel
       # Options:
       #
       # :nulls :: Can be :first/:last for NULLS FIRST/LAST.
-      def initialize(expression, descending = true, opts={})
+      def initialize(expression, descending = true, opts=OPTS)
         @expression, @descending, @nulls = expression, descending, opts[:nulls]
       end
 
@@ -1385,6 +1593,12 @@ module Sequel
         @table, @column = table, column
       end
       
+      # Create a Function using this identifier as the functions name, with
+      # the given args.
+      def function(*args)
+        Function.new(self, *args)
+      end
+      
       to_s_method :qualified_identifier_sql, "@table, @column"
     end
     
@@ -1417,9 +1631,9 @@ module Sequel
       # if a case insensitive regular expression is used (//i), that particular
       # pattern which will always be case insensitive.
       #
-      #   StringExpression.like(:a, 'a%') # "a" LIKE 'a%'
-      #   StringExpression.like(:a, 'a%', :case_insensitive=>true) # "a" ILIKE 'a%'
-      #   StringExpression.like(:a, 'a%', /^a/i) # "a" LIKE 'a%' OR "a" ~* '^a' 
+      #   StringExpression.like(:a, 'a%') # "a" LIKE 'a%' ESCAPE '\'
+      #   StringExpression.like(:a, 'a%', :case_insensitive=>true) # "a" ILIKE 'a%' ESCAPE '\'
+      #   StringExpression.like(:a, 'a%', /^a/i) # "a" LIKE 'a%' ESCAPE '\' OR "a" ~* '^a'
       def self.like(l, *ces)
         l, lre, lci = like_element(l)
         lci = (ces.last.is_a?(Hash) ? ces.pop : {})[:case_insensitive] ? true : lci
@@ -1463,7 +1677,7 @@ module Sequel
       end
 
       # Create a new +Subscript+ appending the given subscript(s)
-      # the the current array of subscripts.
+      # to the current array of subscripts.
       #
       #   :a.sql_subscript(2) # a[2]
       #   :a.sql_subscript(2) | 1 # a[2, 1]
@@ -1489,9 +1703,6 @@ module Sequel
     class ValueList < ::Array
     end
 
-    # Deprecated name for +ValueList+, used for backwards compatibility
-    SQLArray = ValueList
-
     # The purpose of the +VirtualRow+ class is to allow the easy creation of SQL identifiers and functions
     # without relying on methods defined on +Symbol+.  This is useful if another library defines
     # the methods defined by Sequel, if you are running on ruby 1.9, or if you are not using the
@@ -1502,7 +1713,7 @@ module Sequel
     # If the block doesn't take an argument, the block is instance_execed in the context of
     # an instance of this class.
     #
-    # +VirtualRow+ uses +method_missing+ to return either an +Identifier+, +QualifiedIdentifier+, +Function+, or +WindowFunction+, 
+    # +VirtualRow+ uses +method_missing+ to return either an +Identifier+, +QualifiedIdentifier+, or +Function+
     # depending on how it is called.
     #
     # If a block is _not_ given, creates one of the following objects:
@@ -1513,16 +1724,15 @@ module Sequel
     #                          table being the part before __, and the column being the part after.
     # +Identifier+ :: Returned otherwise, using the method name.
     #
-    # If a block is given, it returns either a +Function+ or +WindowFunction+, depending on the first
-    # argument to the method.  Note that the block is currently not called by the code, though
+    # If a block is given, it returns a +Function+.  Note that the block is currently not called by the code, though
     # this may change in a future version.  If the first argument is:
     #
     # no arguments given :: creates a +Function+ with no arguments.
     # :* :: creates a +Function+ with a literal wildcard argument (*), mostly useful for COUNT.
     # :distinct :: creates a +Function+ that prepends DISTINCT to the rest of the arguments, mostly
     #              useful for aggregate functions.
-    # :over :: creates a +WindowFunction+.  If a second argument is provided, it should be a hash
-    #          of options which are passed to Window (with possible keys :window, :partition, :order, and :frame).  The
+    # :over :: creates a +Function+ with a window.  If a second argument is provided, it should be a hash
+    #          of options which are used to create the +Window+ (with possible keys :window, :partition, :order, and :frame).  The
     #          arguments to the function itself should be specified as <tt>:*=>true</tt> for a wildcard, or via
     #          the <tt>:args</tt> option.
     #
@@ -1571,14 +1781,10 @@ module Sequel
     #   # Literal Strings
     #   ds.filter{{a=>`some SQL`}} # SELECT * FROM t WHERE (a = some SQL)
     #
-    # For a more detailed explanation, see the {Virtual Rows guide}[link:files/doc/virtual_rows_rdoc.html].
+    # For a more detailed explanation, see the {Virtual Rows guide}[rdoc-ref:doc/virtual_rows.rdoc].
     class VirtualRow < BasicObject
-      WILDCARD = LiteralString.new('*').freeze
       QUESTION_MARK = LiteralString.new('?').freeze
-      COMMA_SEPARATOR = LiteralString.new(', ').freeze
       DOUBLE_UNDERSCORE = '__'.freeze
-      DISTINCT = ["DISTINCT ".freeze].freeze
-      COMMA_ARRAY = [COMMA_SEPARATOR].freeze
 
       include OperatorBuilders
 
@@ -1595,7 +1801,7 @@ module Sequel
         Sequel::LiteralString.new(s)
       end
 
-      # Return an +Identifier+, +QualifiedIdentifier+, +Function+, or +WindowFunction+, depending
+      # Return an +Identifier+, +QualifiedIdentifier+, or +Function+, depending
       # on arguments and whether a block is provided.  Does not currently call the block.
       # See the class level documentation.
       def method_missing(m, *args, &block)
@@ -1603,17 +1809,18 @@ module Sequel
           if args.empty?
             Function.new(m)
           else
-            case arg = args.shift
+            case args.shift
             when :*
-              Function.new(m, WILDCARD)
+              Function.new(m, *args).*
             when :distinct
-              Function.new(m, PlaceholderLiteralString.new(DISTINCT + COMMA_ARRAY * (args.length-1), args))
+              Function.new(m, *args).distinct
             when :over
-              opts = args.shift || {}
-              fun_args = ::Kernel.Array(opts[:*] ? WILDCARD : opts[:args])
-              WindowFunction.new(Function.new(m, *fun_args), Window.new(opts))
+              opts = args.shift || OPTS
+              f = Function.new(m, *::Kernel.Array(opts[:args]))
+              f = f.* if opts[:*]
+              f.over(opts)
             else
-              raise Error, 'unsupported VirtualRow method argument used with block'
+              Kernel.raise(Error, 'unsupported VirtualRow method argument used with block')
             end
           end
         elsif args.empty?
@@ -1627,9 +1834,7 @@ module Sequel
       Sequel::VIRTUAL_ROW = new
     end
 
-    # A +Window+ is part of a window function specifying the window over which the function operates.
-    # It is separated from the +WindowFunction+ class because it also can be used separately on
-    # some databases.
+    # A +Window+ is part of a window function specifying the window over which a window function operates.
     class Window < Expression
       # The options for this window.  Options currently supported:
       # :frame :: if specified, should be :all, :rows, or a String that is used literally. :all always operates over all rows in the
@@ -1641,27 +1846,11 @@ module Sequel
       attr_reader :opts
 
       # Set the options to the options given
-      def initialize(opts={})
+      def initialize(opts=OPTS)
         @opts = opts
       end
 
       to_s_method :window_sql, '@opts'
-    end
-
-    # A +WindowFunction+ is a grouping of a +Function+ with a +Window+ over which it operates.
-    class WindowFunction < GenericExpression
-      # The function to use, should be an <tt>SQL::Function</tt>.
-      attr_reader :function
-
-      # The window to use, should be an <tt>SQL::Window</tt>.
-      attr_reader :window
-
-      # Set the function and window.
-      def initialize(function, window)
-        @function, @window = function, window
-      end
-
-      to_s_method :window_function_sql, '@function, @window'
     end
 
     # A +Wrapper+ is a simple way to wrap an existing object so that it supports
@@ -1681,7 +1870,7 @@ module Sequel
 
   # +LiteralString+ is used to represent literal SQL expressions. A 
   # +LiteralString+ is copied verbatim into an SQL statement. Instances of
-  # +LiteralString+ can be created by calling <tt>String#lit</tt>.
+  # +LiteralString+ can be created by calling <tt>Sequel.lit</tt>.
   class LiteralString
     include SQL::OrderMethods
     include SQL::ComplexExpressionMethods

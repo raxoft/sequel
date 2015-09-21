@@ -5,19 +5,11 @@ module Sequel
     class Errors < ::Hash
       ATTRIBUTE_JOINER = ' and '.freeze
 
-      # Assign an array of messages for each attribute on access.
-      # Using this message is discouraged in new code, use +add+
-      # to add new error messages, and +on+ to check existing
-      # error messages.
-      def [](k)
-        has_key?(k) ? super : (self[k] = [])
-      end
-
       # Adds an error for the given attribute.
       #
       #   errors.add(:name, 'is not valid') if name == 'invalid'
       def add(att, msg)
-        self[att] << msg
+        fetch(att){self[att] = []} << msg
       end
 
       # Return the total number of error messages.
@@ -37,6 +29,12 @@ module Sequel
       #   errors.full_messages
       #   # => ['name is not valid',
       #   #     'hometown is not at least 2 letters']
+      #
+      # If the message is a Sequel::LiteralString, it will be used literally, without the column name:
+      #
+      #   errors.add(:name, Sequel.lit("Album name is not valid"))
+      #   errors.full_messages
+      #   # => ['Album name is not valid']
       def full_messages
         inject([]) do |m, kv| 
           att, errors = *kv

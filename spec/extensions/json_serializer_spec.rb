@@ -4,7 +4,7 @@ describe "Sequel::Plugins::JsonSerializer" do
   before do
     class ::Artist < Sequel::Model
       unrestrict_primary_key
-      plugin :json_serializer
+      plugin :json_serializer, :naked=>true
       columns :id, :name
       def_column_accessor :id, :name
       @db_schema = {:id=>{:type=>:integer}}
@@ -13,7 +13,7 @@ describe "Sequel::Plugins::JsonSerializer" do
     class ::Album < Sequel::Model
       unrestrict_primary_key
       attr_accessor :blah
-      plugin :json_serializer
+      plugin :json_serializer, :naked=>true
       columns :id, :name, :artist_id
       def_column_accessor :id, :name, :artist_id
       many_to_one :artist
@@ -30,8 +30,8 @@ describe "Sequel::Plugins::JsonSerializer" do
   end
 
   it "should round trip successfully" do
-    Artist.from_json(@artist.to_json).should == @artist
-    Album.from_json(@album.to_json).should == @album
+    Artist.from_json(@artist.to_json).must_equal @artist
+    Album.from_json(@album.to_json).must_equal @album
   end
 
   it "should handle ruby objects in values" do
@@ -40,40 +40,31 @@ describe "Sequel::Plugins::JsonSerializer" do
         super(Date.parse(v))
       end
     end
-    Artist.from_json(Artist.load(:name=>Date.today).to_json).should == Artist.load(:name=>Date.today)
-  end
-
-  it "should have .json_create method for creating an instance from a hash parsed from JSON" do
-    JSON.parse(@artist.to_json, :create_additions=>true).should == @artist
-    JSON.parse(@artist.to_json(:include=>{:albums=>{:include=>{:artist=>{:include=>:albums}}}}), :create_additions=>true).albums.map{|a| a.artist.albums}.should == [[@album]]
-  end
-
-  it "should have .json_create method raise error if not given a hash" do
-    proc{Artist.json_create([])}.should raise_error(Sequel::Error)
+    Artist.from_json(Artist.load(:name=>Date.today).to_json).must_equal Artist.load(:name=>Date.today)
   end
 
   it "should handle the :only option" do
-    Artist.from_json(@artist.to_json(:only=>:name)).should == Artist.load(:name=>@artist.name)
-    Album.from_json(@album.to_json(:only=>[:id, :name])).should == Album.load(:id=>@album.id, :name=>@album.name)
+    Artist.from_json(@artist.to_json(:only=>:name)).must_equal Artist.load(:name=>@artist.name)
+    Album.from_json(@album.to_json(:only=>[:id, :name])).must_equal Album.load(:id=>@album.id, :name=>@album.name)
   end
 
   it "should handle the :except option" do
-    Artist.from_json(@artist.to_json(:except=>:id)).should == Artist.load(:name=>@artist.name)
-    Album.from_json(@album.to_json(:except=>[:id, :artist_id])).should == Album.load(:name=>@album.name)
+    Artist.from_json(@artist.to_json(:except=>:id)).must_equal Artist.load(:name=>@artist.name)
+    Album.from_json(@album.to_json(:except=>[:id, :artist_id])).must_equal Album.load(:name=>@album.name)
   end
 
   it "should handle the :include option for associations" do
-    Artist.from_json(@artist.to_json(:include=>:albums), :associations=>:albums).albums.should == [@album]
-    Album.from_json(@album.to_json(:include=>:artist), :associations=>:artist).artist.should == @artist
+    Artist.from_json(@artist.to_json(:include=>:albums), :associations=>:albums).albums.must_equal [@album]
+    Album.from_json(@album.to_json(:include=>:artist), :associations=>:artist).artist.must_equal @artist
   end
 
   it "should raise an error if attempting to parse json when providing array to non-array association or vice-versa" do
-    proc{Artist.from_json('{"albums":{"id":1,"name":"RF","artist_id":2,"json_class":"Album"},"id":2,"name":"YJM","json_class":"Artist"}', :associations=>:albums)}.should raise_error(Sequel::Error)
-    proc{Album.from_json('{"artist":[{"id":2,"name":"YJM","json_class":"Artist"}],"id":1,"name":"RF","json_class":"Album","artist_id":2}', :associations=>:artist)}.should raise_error(Sequel::Error)
+    proc{Artist.from_json('{"albums":{"id":1,"name":"RF","artist_id":2,"json_class":"Album"},"id":2,"name":"YJM"}', :associations=>:albums)}.must_raise(Sequel::Error)
+    proc{Album.from_json('{"artist":[{"id":2,"name":"YJM","json_class":"Artist"}],"id":1,"name":"RF","artist_id":2}', :associations=>:artist)}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if attempting to parse an array containing non-hashes" do
-    proc{Artist.from_json('[{"id":2,"name":"YJM","json_class":"Artist"}, 2]')}.should raise_error(Sequel::Error)
+    proc{Artist.from_json('[{"id":2,"name":"YJM","json_class":"Artist"}, 2]')}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if attempting to parse invalid JSON" do
@@ -84,7 +75,7 @@ describe "Sequel::Plugins::JsonSerializer" do
           v
         end
       end
-      proc{Album.from_json('1')}.should raise_error(Sequel::Error)
+      proc{Album.from_json('1')}.must_raise(Sequel::Error)
     ensure
       Sequel.instance_eval do
         alias parse_json pj
@@ -100,7 +91,7 @@ describe "Sequel::Plugins::JsonSerializer" do
           Album.load(:id=>3)
         end
       end
-      ::Album.from_json('1').should == Album.load(:id=>3)
+      ::Album.from_json('1').must_equal Album.load(:id=>3)
     ensure
       Sequel.instance_eval do
         alias parse_json pj
@@ -109,96 +100,91 @@ describe "Sequel::Plugins::JsonSerializer" do
   end
 
   it "should handle the :include option for arbitrary attributes" do
-    Album.from_json(@album.to_json(:include=>:blah)).blah.should == @album.blah
+    Album.from_json(@album.to_json(:include=>:blah)).blah.must_equal @album.blah
   end
 
   it "should handle multiple inclusions using an array for the :include option" do
     a = Album.from_json(@album.to_json(:include=>[:blah, :artist]), :associations=>:artist)
-    a.blah.should == @album.blah
-    a.artist.should == @artist
+    a.blah.must_equal @album.blah
+    a.artist.must_equal @artist
   end
 
   it "should handle cascading using a hash for the :include option" do
-    Artist.from_json(@artist.to_json(:include=>{:albums=>{:include=>:artist}}), :associations=>{:albums=>{:associations=>:artist}}).albums.map{|a| a.artist}.should == [@artist]
-    Album.from_json(@album.to_json(:include=>{:artist=>{:include=>:albums}}), :associations=>{:artist=>{:associations=>:albums}}).artist.albums.should == [@album]
+    Artist.from_json(@artist.to_json(:include=>{:albums=>{:include=>:artist}}), :associations=>{:albums=>{:associations=>:artist}}).albums.map{|a| a.artist}.must_equal [@artist]
+    Album.from_json(@album.to_json(:include=>{:artist=>{:include=>:albums}}), :associations=>{:artist=>{:associations=>:albums}}).artist.albums.must_equal [@album]
 
-    Artist.from_json(@artist.to_json(:include=>{:albums=>{:only=>:name}}), :associations=>[:albums]).albums.should == [Album.load(:name=>@album.name)]
-    Album.from_json(@album.to_json(:include=>{:artist=>{:except=>:name}}), :associations=>[:artist]).artist.should == Artist.load(:id=>@artist.id)
+    Artist.from_json(@artist.to_json(:include=>{:albums=>{:only=>:name}}), :associations=>[:albums]).albums.must_equal [Album.load(:name=>@album.name)]
+    Album.from_json(@album.to_json(:include=>{:artist=>{:except=>:name}}), :associations=>[:artist]).artist.must_equal Artist.load(:id=>@artist.id)
 
-    Artist.from_json(@artist.to_json(:include=>{:albums=>{:include=>{:artist=>{:include=>:albums}}}}), :associations=>{:albums=>{:associations=>{:artist=>{:associations=>:albums}}}}).albums.map{|a| a.artist.albums}.should == [[@album]]
-    Album.from_json(@album.to_json(:include=>{:artist=>{:include=>{:albums=>{:only=>:name}}}}), :associations=>{:artist=>{:associations=>:albums}}).artist.albums.should == [Album.load(:name=>@album.name)]
-  end
-
-  it "should automatically cascade parsing for all associations if :all_associations is used" do
-    Artist.from_json(@artist.to_json(:include=>{:albums=>{:include=>:artist}}), :all_associations=>true).albums.map{|a| a.artist}.should == [@artist]
+    Artist.from_json(@artist.to_json(:include=>{:albums=>{:include=>{:artist=>{:include=>:albums}}}}), :associations=>{:albums=>{:associations=>{:artist=>{:associations=>:albums}}}}).albums.map{|a| a.artist.albums}.must_equal [[@album]]
+    Album.from_json(@album.to_json(:include=>{:artist=>{:include=>{:albums=>{:only=>:name}}}}), :associations=>{:artist=>{:associations=>:albums}}).artist.albums.must_equal [Album.load(:name=>@album.name)]
   end
 
   it "should handle the :include option cascading with an empty hash" do
-    Album.from_json(@album.to_json(:include=>{:artist=>{}}), :associations=>:artist).artist.should == @artist
-    Album.from_json(@album.to_json(:include=>{:blah=>{}})).blah.should == @album.blah
+    Album.from_json(@album.to_json(:include=>{:artist=>{}}), :associations=>:artist).artist.must_equal @artist
+    Album.from_json(@album.to_json(:include=>{:blah=>{}})).blah.must_equal @album.blah
   end
 
   it "should accept a :naked option to not include the JSON.create_id, so parsing yields a plain hash" do
-    Sequel.parse_json(@album.to_json(:naked=>true)).should == @album.values.inject({}){|h, (k, v)| h[k.to_s] = v; h}
+    Sequel.parse_json(@album.to_json(:naked=>true)).must_equal @album.values.inject({}){|h, (k, v)| h[k.to_s] = v; h}
   end
 
   it "should support #from_json to set column values" do
     @artist.from_json('{"name": "AS"}')
-    @artist.name.should == 'AS'
-    @artist.id.should == 2
+    @artist.name.must_equal 'AS'
+    @artist.id.must_equal 2
   end
 
   it "should support #from_json to support specific :fields" do
     @album.from_json('{"name": "AS", "artist_id": 3}', :fields=>['name'])
-    @album.name.should == 'AS'
-    @album.artist_id.should == 2
+    @album.name.must_equal 'AS'
+    @album.artist_id.must_equal 2
   end
 
   it "should support #from_json to support :missing=>:skip option" do
     @album.from_json('{"artist_id": 3}', :fields=>['name'], :missing=>:skip)
-    @album.name.should == 'RF'
-    @album.artist_id.should == 2
+    @album.name.must_equal 'RF'
+    @album.artist_id.must_equal 2
   end
 
   it "should support #from_json to support :missing=>:raise option" do
-    proc{@album.from_json('{"artist_id": 3}', :fields=>['name'], :missing=>:raise)}.should raise_error(Sequel::Error)
+    proc{@album.from_json('{"artist_id": 3}', :fields=>['name'], :missing=>:raise)}.must_raise(Sequel::Error)
   end
 
   it "should have #from_json raise an error if parsed json isn't a hash" do
-    proc{@artist.from_json('[]')}.should raise_error(Sequel::Error)
+    proc{@artist.from_json('[]')}.must_raise(Sequel::Error)
   end
 
   it "should raise an exception for json keys that aren't associations, columns, or setter methods" do
     Album.send(:undef_method, :blah=)
-    proc{Album.from_json(@album.to_json(:include=>:blah))}.should raise_error(Sequel::Error)
+    proc{Album.from_json(@album.to_json(:include=>:blah))}.must_raise(Sequel::MassAssignmentRestriction)
   end
 
   it "should support a to_json class and dataset method" do
     Album.dataset._fetch = {:id=>1, :name=>'RF', :artist_id=>2}
     Artist.dataset._fetch = {:id=>2, :name=>'YJM'}
-    Album.array_from_json(Album.to_json).should == [@album]
-    Album.array_from_json(Album.to_json(:include=>:artist), :associations=>:artist).map{|x| x.artist}.should == [@artist]
-    Album.array_from_json(Album.dataset.to_json(:only=>:name)).should == [Album.load(:name=>@album.name)]
+    Album.array_from_json(Album.to_json).must_equal [@album]
+    Album.array_from_json(Album.to_json(:include=>:artist), :associations=>:artist).map{|x| x.artist}.must_equal [@artist]
+    Album.array_from_json(Album.dataset.to_json(:only=>:name)).must_equal [Album.load(:name=>@album.name)]
   end
 
   it "should have dataset to_json method work with naked datasets" do
-    album = @album
     ds = Album.dataset.naked
     ds._fetch = {:id=>1, :name=>'RF', :artist_id=>2}
-    Sequel.parse_json(ds.to_json).should == [@album.values.inject({}){|h, (k, v)| h[k.to_s] = v; h}]
+    Sequel.parse_json(ds.to_json).must_equal [@album.values.inject({}){|h, (k, v)| h[k.to_s] = v; h}]
   end
 
   it "should have dataset to_json method respect :array option for the array to use" do
     a = Album.new(:name=>'RF', :artist_id=>3)
-    Album.array_from_json(Album.to_json(:array=>[a])).should == [a]
+    Album.array_from_json(Album.to_json(:array=>[a])).must_equal [a]
 
     a.associations[:artist] = artist = Artist.load(:id=>3, :name=>'YJM')
-    Album.array_from_json(Album.to_json(:array=>[a], :include=>:artist), :associations=>:artist).first.artist.should == artist
+    Album.array_from_json(Album.to_json(:array=>[a], :include=>:artist), :associations=>:artist).first.artist.must_equal artist
 
     artist.associations[:albums] = [a]
     x = Artist.array_from_json(Artist.to_json(:array=>[artist], :include=>:albums), :associations=>[:albums])
-    x.should == [artist]
-    x.first.albums.should == [a]
+    x.must_equal [artist]
+    x.first.albums.must_equal [a]
   end
 
   it "should propagate class default options to instance to_json output" do
@@ -211,98 +197,95 @@ describe "Sequel::Plugins::JsonSerializer" do
     @album2 = Album2.load(:id=>2, :name=>'JK')
     @album2.artist = @artist
     @album2.blah = 'Gak'
-    JSON.parse(@album2.to_json).should == @album2.values.reject{|k,v| k.to_s == 'id'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
-    JSON.parse(@album2.to_json(:only => :name)).should == @album2.values.reject{|k,v| k.to_s != 'name'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
-    JSON.parse(@album2.to_json(:except => :artist_id)).should == @album2.values.reject{|k,v| k.to_s == 'artist_id'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
+    JSON.parse(@album2.to_json).must_equal @album2.values.reject{|k,v| k.to_s == 'id'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
+    JSON.parse(@album2.to_json(:only => :name)).must_equal @album2.values.reject{|k,v| k.to_s != 'name'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
+    JSON.parse(@album2.to_json(:except => :artist_id)).must_equal @album2.values.reject{|k,v| k.to_s == 'artist_id'}.inject({}){|h, (k, v)| h[k.to_s] = v; h}
   end
   
   it "should handle the :root option to qualify single records" do
-    @album.to_json(:root=>true, :except => [:name, :artist_id]).to_s.should == '{"album":{"id":1}}'
-    @album.to_json(:root=>true, :only => :name).to_s.should == '{"album":{"name":"RF"}}'
+    @album.to_json(:root=>true, :except => [:name, :artist_id]).to_s.must_equal '{"album":{"id":1}}'
+    @album.to_json(:root=>true, :only => :name).to_s.must_equal '{"album":{"name":"RF"}}'
+  end
+
+  it "should handle the :root option to qualify single records of namespaced models" do
+    module ::Namespace
+      class Album < Sequel::Model
+        plugin :json_serializer, :naked=>true
+      end
+    end
+    Namespace::Album.new({}).to_json(:root=>true).to_s.must_equal '{"album":{}}'
+    Namespace::Album.dataset._fetch = [{}]
+    Namespace::Album.dataset.to_json(:root=>:collection).to_s.must_equal '{"albums":[{}]}'
+    Namespace::Album.dataset.to_json(:root=>:both).to_s.must_equal '{"albums":[{"album":{}}]}'
+    Object.send(:remove_const, :Namespace)
+  end
+  
+  it "should handle the :root option with a string to qualify single records using the string as the key" do
+    @album.to_json(:root=>"foo", :except => [:name, :artist_id]).to_s.must_equal '{"foo":{"id":1}}'
+    @album.to_json(:root=>"bar", :only => :name).to_s.must_equal '{"bar":{"name":"RF"}}'
   end
   
   it "should handle the :root=>:both option to qualify a dataset of records" do
     Album.dataset._fetch = [{:id=>1, :name=>'RF'}, {:id=>1, :name=>'RF'}]
-    Album.dataset.to_json(:root=>true, :only => :id).to_s.should == '{"albums":[{"album":{"id":1}},{"album":{"id":1}}]}'
+    Album.dataset.to_json(:root=>:both, :only => :id).to_s.must_equal '{"albums":[{"album":{"id":1}},{"album":{"id":1}}]}'
   end
 
   it "should handle the :root=>:collection option to qualify just the collection" do
     Album.dataset._fetch = [{:id=>1, :name=>'RF'}, {:id=>1, :name=>'RF'}]
-    Album.dataset.to_json(:root=>:collection, :only => :id).to_s.should == '{"albums":[{"id":1},{"id":1}]}'
+    Album.dataset.to_json(:root=>:collection, :only => :id).to_s.must_equal '{"albums":[{"id":1},{"id":1}]}'
+    Album.dataset.to_json(:root=>true, :only => :id).to_s.must_equal '{"albums":[{"id":1},{"id":1}]}'
   end
 
   it "should handle the :root=>:instance option to qualify just the instances" do
     Album.dataset._fetch = [{:id=>1, :name=>'RF'}, {:id=>1, :name=>'RF'}]
-    Album.dataset.to_json(:root=>:instance, :only => :id).to_s.should == '[{"album":{"id":1}},{"album":{"id":1}}]'
+    Album.dataset.to_json(:root=>:instance, :only => :id).to_s.must_equal '[{"album":{"id":1}},{"album":{"id":1}}]'
   end
 
-  it "should handle the :root=>true option be the same as :root=>:both for backwards compatibility" do
+  it "should handle the :root=>string option to qualify just the collection using the string as the key" do
     Album.dataset._fetch = [{:id=>1, :name=>'RF'}, {:id=>1, :name=>'RF'}]
-    Album.dataset.to_json(:root=>true, :only => :id).to_s.should == '{"albums":[{"album":{"id":1}},{"album":{"id":1}}]}'
+    Album.dataset.to_json(:root=>"foos", :only => :id).to_s.must_equal '{"foos":[{"id":1},{"id":1}]}'
+    Album.dataset.to_json(:root=>"bars", :only => :id).to_s.must_equal '{"bars":[{"id":1},{"id":1}]}'
   end
 
   it "should store the default options in json_serializer_opts" do
-    Album.json_serializer_opts.should == {}
+    Album.json_serializer_opts.must_equal(:naked=>true)
     c = Class.new(Album)
-    c.plugin :json_serializer, :naked=>true
-    c.json_serializer_opts.should == {:naked=>true}
+    c.plugin :json_serializer, :naked=>false
+    c.json_serializer_opts.must_equal(:naked=>false)
   end
 
   it "should work correctly when subclassing" do
     class ::Artist2 < Artist
       plugin :json_serializer, :only=>:name
     end
-    Artist2.from_json(Artist2.load(:id=>2, :name=>'YYY').to_json).should == Artist2.load(:name=>'YYY')
+    Artist2.from_json(Artist2.load(:id=>2, :name=>'YYY').to_json).must_equal Artist2.load(:name=>'YYY')
     class ::Artist3 < Artist2
       plugin :json_serializer, :naked=>:true
     end
-    Sequel.parse_json(Artist3.load(:id=>2, :name=>'YYY').to_json).should == {"name"=>'YYY'}
+    Sequel.parse_json(Artist3.load(:id=>2, :name=>'YYY').to_json).must_equal("name"=>'YYY')
     Object.send(:remove_const, :Artist2)
     Object.send(:remove_const, :Artist3)
   end
 
-  it "should have :associations option take precedence over :all_assocations" do
-    Artist.from_json(@artist.to_json(:include=>:albums), :associations=>[], :all_associations=>true, :fields=>[]).associations.should == {}
-  end
-
-  it "should allow overriding of :all_columns options in associated objects" do
-    Album.restrict_primary_key
-    Artist.from_json(@artist.to_json(:include=>:albums), :associations=>{:albums=>{:fields=>[:id, :name, :artist_id], :missing=>:raise}}, :all_columns=>true).albums.should == [@album]
-  end
-
-  it "should handle typecasting if setter columns exist when using :all_columns" do
-    Artist.restrict_primary_key
-    Artist.from_json('{"id":"2","name":"YJM","json_class":"Artist"}', :all_columns=>true).should == @artist
-  end
-
-  it "should allow setting columns that are restricted if :all_columns is used" do
-    Artist.restrict_primary_key
-    Artist.from_json(@artist.to_json, :all_columns=>true).should == @artist
-  end
-
-  it "should raise an error if using :all_columns and non-column is in the JSON" do
-    proc{Artist.from_json('{"foo":"bar"}', :all_columns=>true)}.should raise_error(Sequel::Error)
-  end
-
   it "should raise an error if attempting to set a restricted column and :all_columns is not used" do
     Artist.restrict_primary_key
-    proc{Artist.from_json(@artist.to_json)}.should raise_error(Sequel::Error)
+    proc{Artist.from_json(@artist.to_json)}.must_raise(Sequel::MassAssignmentRestriction)
   end
 
   it "should raise an error if an unsupported association is passed in the :associations option" do
     Artist.association_reflections.delete(:albums)
-    proc{Artist.from_json(@artist.to_json(:include=>:albums), :associations=>:albums)}.should raise_error(Sequel::Error)
+    proc{Artist.from_json(@artist.to_json(:include=>:albums), :associations=>:albums)}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using from_json and JSON parsing returns an array" do
-    proc{Artist.from_json([@artist].to_json)}.should raise_error(Sequel::Error)
+    proc{Artist.from_json([@artist].to_json)}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using array_from_json and JSON parsing does not return an array" do
-    proc{Artist.array_from_json(@artist.to_json)}.should raise_error(Sequel::Error)
+    proc{Artist.array_from_json(@artist.to_json)}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using an unsupported :associations option" do
-    proc{Artist.from_json(@artist.to_json, :associations=>'')}.should raise_error(Sequel::Error)
+    proc{Artist.from_json(@artist.to_json, :associations=>'')}.must_raise(Sequel::Error)
   end
 end

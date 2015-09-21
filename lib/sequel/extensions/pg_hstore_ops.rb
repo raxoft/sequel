@@ -20,8 +20,8 @@
 #
 #   h = Sequel.expr(:hstore_column).hstore
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#hstore:
 #
 #   h = :hstore_column.hstore
@@ -29,7 +29,7 @@
 # This creates a Sequel::Postgres::HStoreOp object that can be used
 # for easier querying:
 #
-#   h - 'a'    # hstore_column - 'a'
+#   h - 'a'    # hstore_column - CAST('a' AS text)
 #   h['a']     # hstore_column -> 'a'
 #
 #   h.concat(:other_hstore_column)       # ||
@@ -52,13 +52,29 @@
 #   h.to_matrix      # hstore_to_matrix(hstore_column)
 #   h.values         # avals(hstore_column)
 #
+# Here are a couple examples for updating an existing hstore column:
+#
+#   # Add a key, or update an existing key with a new value
+#   DB[:tab].update(:h=>Sequel.hstore_op(:h).concat('c'=>3))
+# 
+#   # Delete a key
+#   DB[:tab].update(:h=>Sequel.hstore_op(:h).delete('k1'))
+#  
 # See the PostgreSQL hstore function and operator documentation for more
 # details on what these functions and operators do.
 #
 # If you are also using the pg_hstore extension, you should load it before
 # loading this extension.  Doing so will allow you to use HStore#op to get
 # an HStoreOp, allowing you to perform hstore operations on hstore literals.
+#
+# Some of these methods will accept ruby arrays and convert them automatically to
+# PostgreSQL arrays if you have the pg_array extension loaded.  Some of these methods
+# will accept ruby hashes and convert them automatically to PostgreSQL hstores if the
+# pg_hstore extension is loaded.  Methods representing expressions that return
+# PostgreSQL arrays will have the returned expression automatically wrapped in a
+# Postgres::ArrayOp if the pg_array_ops extension is loaded.
 
+#
 module Sequel
   module Postgres
     # The HStoreOp class is a simple container for a single object that
@@ -82,6 +98,11 @@ module Sequel
       #
       #   hstore_op - 'a' # (hstore - 'a')
       def -(other)
+        other = if other.is_a?(String) && !other.is_a?(Sequel::LiteralString)
+          Sequel.cast_string(other)
+        else
+          wrap_input_array(wrap_input_hash(other))
+        end
         HStoreOp.new(super)
       end
 
@@ -89,35 +110,40 @@ module Sequel
       #
       #   hstore_op['a'] # (hstore -> 'a')
       def [](key)
-        Sequel::SQL::StringExpression.new(:NOOP, Sequel::SQL::PlaceholderLiteralString.new(LOOKUP, [value, key]))
+        v = Sequel::SQL::PlaceholderLiteralString.new(LOOKUP, [value, wrap_input_array(key)])
+        if key.is_a?(Array) || (defined?(Sequel::Postgres::PGArray) && key.is_a?(Sequel::Postgres::PGArray)) || (defined?(Sequel::Postgres::ArrayOp) && key.is_a?(Sequel::Postgres::ArrayOp))
+          wrap_output_array(v)
+        else
+          Sequel::SQL::StringExpression.new(:NOOP, v)
+        end
       end
 
       # Check if the receiver contains all of the keys in the given array:
       #
       #   hstore_op.contain_all(:a) # (hstore ?& a)
       def contain_all(other)
-        bool_op(CONTAIN_ALL, other)
+        bool_op(CONTAIN_ALL, wrap_input_array(other))
       end
 
       # Check if the receiver contains any of the keys in the given array:
       #
       #   hstore_op.contain_any(:a) # (hstore ?| a)
       def contain_any(other)
-        bool_op(CONTAIN_ANY, other)
+        bool_op(CONTAIN_ANY, wrap_input_array(other))
       end
 
       # Check if the receiver contains all entries in the other hstore:
       #
       #   hstore_op.contains(:h) # (hstore @> h)
       def contains(other)
-        bool_op(CONTAINS, other)
+        bool_op(CONTAINS, wrap_input_hash(other))
       end
 
       # Check if the other hstore contains all entries in the receiver:
       #
       #   hstore_op.contained_by(:h) # (hstore <@ h)
       def contained_by(other)
-        bool_op(CONTAINED_BY, other)
+        bool_op(CONTAINED_BY, wrap_input_hash(other))
       end
 
       # Check if the receiver contains a non-NULL value for the given key:
@@ -131,7 +157,7 @@ module Sequel
       #
       #   hstore_op.delete('a') # delete(hstore, 'a')
       def delete(key)
-        HStoreOp.new(function(:delete, key))
+        HStoreOp.new(function(:delete, wrap_input_array(wrap_input_hash(key))))
       end
 
       # Transform the receiver into a set of keys and values:
@@ -161,7 +187,7 @@ module Sequel
       #
       #   hstore_op.keys # akeys(hstore)
       def keys
-        function(:akeys)
+        wrap_output_array(function(:akeys))
       end
       alias akeys keys
 
@@ -169,7 +195,7 @@ module Sequel
       #
       #   hstore_op.merge(:a) # (hstore || a)
       def merge(other)
-        HStoreOp.new(Sequel::SQL::PlaceholderLiteralString.new(CONCAT, [self, other]))
+        HStoreOp.new(Sequel::SQL::PlaceholderLiteralString.new(CONCAT, [self, wrap_input_hash(other)]))
       end
       alias concat merge
 
@@ -198,7 +224,7 @@ module Sequel
       #
       #   hstore_op.slice(:a) # slice(hstore, a)
       def slice(keys)
-        HStoreOp.new(function(:slice, keys))
+        HStoreOp.new(function(:slice, wrap_input_array(keys)))
       end
 
       # Return the values as a PostgreSQL set:
@@ -213,7 +239,7 @@ module Sequel
       #
       #   hstore_op.to_array # hstore_to_array(hstore)
       def to_array
-        function(:hstore_to_array)
+        wrap_output_array(function(:hstore_to_array))
       end
 
       # Return a nested array of the receiver, with arrays of
@@ -221,14 +247,14 @@ module Sequel
       #
       #   hstore_op.to_matrix # hstore_to_matrix(hstore)
       def to_matrix
-        function(:hstore_to_matrix)
+        wrap_output_array(function(:hstore_to_matrix))
       end
 
       # Return the values as a PostgreSQL array:
       #
       #   hstore_op.values # avals(hstore)
       def values
-        function(:avals)
+        wrap_output_array(function(:avals))
       end
       alias avals values
 
@@ -244,6 +270,33 @@ module Sequel
       # argument, with any additional arguments given.
       def function(name, *args)
         SQL::Function.new(name, self, *args)
+      end
+
+      # Wrap argument in a PGArray if it is an array
+      def wrap_input_array(obj)
+        if obj.is_a?(Array) && Sequel.respond_to?(:pg_array) 
+          Sequel.pg_array(obj)
+        else
+          obj
+        end
+      end
+
+      # Wrap argument in an Hstore if it is a hash
+      def wrap_input_hash(obj)
+        if obj.is_a?(Hash) && Sequel.respond_to?(:hstore) 
+          Sequel.hstore(obj)
+        else
+          obj
+        end
+      end
+
+      # Wrap argument in a PGArrayOp if supported
+      def wrap_output_array(obj)
+        if Sequel.respond_to?(:pg_array_op) 
+          Sequel.pg_array_op(obj)
+        else
+          obj
+        end
       end
     end
 

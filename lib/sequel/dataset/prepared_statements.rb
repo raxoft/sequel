@@ -3,10 +3,37 @@ module Sequel
     # ---------------------
     # :section: 8 - Methods related to prepared statements or bound variables
     # On some adapters, these use native prepared statements and bound variables, on others
-    # support is emulated.  For details, see the {"Prepared Statements/Bound Variables" guide}[link:files/doc/prepared_statements_rdoc.html].
+    # support is emulated.  For details, see the {"Prepared Statements/Bound Variables" guide}[rdoc-ref:doc/prepared_statements.rdoc].
     # ---------------------
     
     PREPARED_ARG_PLACEHOLDER = LiteralString.new('?').freeze
+
+    DEFAULT_PREPARED_STATEMENT_MODULE_METHODS = %w'execute execute_dui execute_insert'.freeze.each(&:freeze)
+    PREPARED_STATEMENT_MODULE_CODE = {
+      :bind => "opts = Hash[opts]; opts[:arguments] = bind_arguments".freeze,
+      :prepare => "sql = prepared_statement_name".freeze,
+      :prepare_bind => "sql = prepared_statement_name; opts = Hash[opts]; opts[:arguments] = bind_arguments".freeze
+    }.freeze
+
+    def self.prepared_statements_module(code, mods, meths=DEFAULT_PREPARED_STATEMENT_MODULE_METHODS, &block)
+      code = PREPARED_STATEMENT_MODULE_CODE[code] || code
+
+      Module.new do
+        Array(mods).each do |mod|
+          include mod
+        end
+
+        if block
+          module_eval(&block)
+        end
+
+        meths.each do |meth|
+          module_eval("def #{meth}(sql, opts=Sequel::OPTS) #{code}; super end", __FILE__, __LINE__)
+        end
+        private(*meths)
+      end
+    end
+    private_class_method :prepared_statements_module
     
     # Default implementation of the argument mapper to allow
     # native database support for bind variables and prepared
@@ -63,11 +90,18 @@ module Sequel
       # The argument to supply to insert and update, which may use
       # placeholders specified by prepared_args
       attr_accessor :prepared_modify_values
-      
+
       # Sets the prepared_args to the given hash and runs the
       # prepared statement.
       def call(bind_vars={}, &block)
         bind(bind_vars).run(&block)
+      end
+
+      # Raise an error if attempting to call prepare on an already
+      # prepared statement.
+      def prepare(*)
+        raise Error, "cannot prepare an already prepared statement" unless allow_preparing_prepared_statements?
+        super
       end
 
       # Send the columns to the original dataset, as calling it
@@ -86,7 +120,7 @@ module Sequel
         when :first
           clone(:limit=>1).select_sql
         when :insert_select
-          returning.insert_sql(*@prepared_modify_values)
+          insert_select_sql(*@prepared_modify_values)
         when :insert
           insert_sql(*@prepared_modify_values)
         when :update
@@ -118,7 +152,7 @@ module Sequel
       # with the prepared SQL it represents (which in general won't have
       # substituted variables).
       def inspect
-        "<#{self.class.name}/PreparedStatement #{prepared_sql.inspect}>"
+        "<#{visible_class_name}/PreparedStatement #{prepared_sql.inspect}>"
       end
       
       protected
@@ -137,12 +171,14 @@ module Sequel
           with_sql(prepared_sql).first
         when :first
           first
-        when :insert
-          insert(*@prepared_modify_values)
-        when :update
-          update(*@prepared_modify_values)
-        when :delete
-          delete
+        when :insert, :update, :delete
+          if opts[:returning] && supports_returning?(@prepared_type)
+            returning_fetch_rows(prepared_sql)
+          elsif @prepared_type == :delete
+            delete
+          else
+            send(@prepared_type, *@prepared_modify_values)
+          end
         when Array
           case @prepared_type.at(0)
           when :map, :to_hash, :to_hash_groups
@@ -163,6 +199,12 @@ module Sequel
       # Whether there is a bound value for the given key.
       def prepared_arg?(k)
         @opts[:bind_vars].has_key?(k)
+      end
+
+      # The symbol cache should always be skipped, since placeholders
+      # are symbols.
+      def skip_symbol_cache?
+        true
       end
 
       # Use a clone of the dataset extended with prepared statement
@@ -215,7 +257,7 @@ module Sequel
     #   # SELECT * FROM table WHERE id = ? LIMIT 1 -- (1)
     #   # => {:id=>1}
     def bind(bind_vars={})
-      clone(:bind_vars=>@opts[:bind_vars] ? @opts[:bind_vars].merge(bind_vars) : bind_vars)
+      clone(:bind_vars=>@opts[:bind_vars] ? Hash[@opts[:bind_vars]].merge!(bind_vars) : bind_vars)
     end
     
     # For the given type (:select, :first, :insert, :insert_select, :update, or :delete),
@@ -268,6 +310,11 @@ module Sequel
 
     private
     
+    # Don't allow preparing prepared statements by default.
+    def allow_preparing_prepared_statements?
+      false
+    end
+
     # The argument placeholder.  Most databases used unnumbered
     # arguments with question marks, so that is the default.
     def prepared_arg_placeholder

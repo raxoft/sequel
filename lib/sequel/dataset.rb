@@ -21,8 +21,10 @@ module Sequel
   # Datasets are Enumerable objects, so they can be manipulated using any
   # of the Enumerable methods, such as map, inject, etc.
   #
-  # For more information, see the {"Dataset Basics" guide}[link:files/doc/dataset_basics_rdoc.html].
+  # For more information, see the {"Dataset Basics" guide}[rdoc-ref:doc/dataset_basics.rdoc].
   class Dataset
+    OPTS = Sequel::OPTS
+
     include Enumerable
     include SQL::AliasMethods
     include SQL::BooleanMethods
@@ -34,5 +36,5 @@ module Sequel
     include SQL::StringMethods
   end
   
-  require(%w"query actions features graph prepared_statements misc mutation sql", 'dataset')
+  require(%w"query actions features graph prepared_statements misc mutation sql placeholder_literalizer", 'dataset')
 end

@@ -1,10 +1,10 @@
 # The pg_array extension adds support for Sequel to handle
 # PostgreSQL's array types.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when array fields are retrieved, they are parsed and returned
-# as instances of Sequel::Postgres::PGArray.  PGArray is
-# a DelegateClass of Array, so it mostly acts like an array, but not
+# This extension integrates with Sequel's native postgres adapter and
+# the jdbc/postgresql adapter, so that when array fields are retrieved,
+# they are parsed and returned as instances of Sequel::Postgres::PGArray.
+# PGArray is a DelegateClass of Array, so it mostly acts like an array, but not
 # completely (is_a?(Array) is false).  If you want the actual array,
 # you can call PGArray#to_a.  This is done so that Sequel does not
 # treat a PGArray like an Array by default, which would cause issues.
@@ -17,13 +17,13 @@
 #
 #   Sequel.pg_array(array)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Array#pg_array:
 #
 #   array.pg_array
 #
-# You can also provide a type, though it many cases it isn't necessary:
+# You can also provide a type, though in many cases it isn't necessary:
 #
 #   Sequel.pg_array(array, :varchar) # or :integer, :"double precision", etc.
 #   array.pg_array(:varchar) # or :integer, :"double precision", etc.
@@ -32,67 +32,55 @@
 #
 #   DB[:table].insert(:column=>Sequel.pg_array([1, 2, 3]))
 #
-# If you would like to use PostgreSQL arrays in your model objects, you
-# probably want to modify the schema parsing/typecasting so that it
-# recognizes and correctly handles the arrays, which you can do by:
+# To use this extension, first load it into your Sequel::Database instance:
 #
 #   DB.extension :pg_array
 #
-# If you are not using the native postgres adapter, you probably
-# also want to use the typecast_on_load plugin in the model, and
-# set it to typecast the array column(s) on load.
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using postgres array columns in CREATE/ALTER TABLE statements.
+#
+# If you are not using the native postgres or jdbc/postgresql adapter and are using array
+# types as model column values you probably should use the the pg_typecast_on_load plugin
+# if the column values are returned as a string.
 #
 # This extension by default includes handlers for array types for
 # all scalar types that the native postgres adapter handles. It
 # also makes it easy to add support for other array types.  In
 # general, you just need to make sure that the scalar type is
 # handled and has the appropriate converter installed in
-# Sequel::Postgres::PG_TYPES under the appropriate type OID.
-# Then you can call Sequel::Postgres::PGArray.register with
-# the appropriate arguments to automatically set up a handler
-# for the array type.
+# Sequel::Postgres::PG_TYPES or the Database instance's
+# conversion_procs usingthe appropriate type OID.  For user defined
+# types, you can do this via:
 #
-# For example, if you add support for a scalar custom type named
-# foo which uses OID 1234, and you want to add support for the
-# foo[] type, which uses type OID 4321, you need to do:
+#   DB.conversion_procs[scalar_type_oid] = lambda{|string| }
 #
+# Then you can call
+# Sequel::Postgres::PGArray::DatabaseMethods#register_array_type
+# to automatically set up a handler for the array type.  So if you
+# want to support the foo[] type (assuming the foo type is already
+# supported):
+#
+#   DB.register_array_type('foo')
+#
+# You can also register array types on a global basis using
+# Sequel::Postgres::PGArray.register.  In this case, you'll have
+# to specify the type oids:
+#
+#   Sequel::Postgres::PG_TYPES[1234] = lambda{|string| }
 #   Sequel::Postgres::PGArray.register('foo', :oid=>4321, :scalar_oid=>1234)
 #
-# Sequel::Postgres::PGArray.register has many additional options
-# and should be able to handle most PostgreSQL array types.
+# Both Sequel::Postgres::PGArray::DatabaseMethods#register_array_type
+# and Sequel::Postgres::PGArray.register support many options to
+# customize the array type handling.  See the Sequel::Postgres::PGArray.register
+# method documentation.
 #
 # If you want an easy way to call PostgreSQL array functions and
 # operators, look into the pg_array_ops extension.
 #
-# This extension requires both the json and delegate libraries.
-#
-# == Additional License
-#
-# PGArray::Parser code was translated from Javascript code in the
-# node-postgres project and has the following additional license:
-# 
-# Copyright (c) 2010 Brian Carlson (brian.m.carlson@gmail.com)
-# 
-# Permission is hereby granted, free of charge, to any person obtaining
-# a copy of this software and associated documentation files (the
-# "Software"), to deal in the Software without restriction, including
-# without limitation the rights to use, copy, modify, merge, publish,
-# distribute, sublicense, and/or sell copies of the Software, and to
-# permit persons to whom the Software is furnished to do so, subject
-# to the following conditions:
-# 
-# The above copyright notice and this permission notice shall be included
-# in all copies or substantial portions of the Software.
-# 
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
-# KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
-# WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# This extension requires the json, strscan, and delegate libraries.
 
 require 'delegate'
+require 'strscan'
 require 'json'
 Sequel.require 'adapters/utils/pg_types'
 
@@ -104,6 +92,7 @@ module Sequel
 
       ARRAY = "ARRAY".freeze
       DOUBLE_COLON = '::'.freeze
+      EMPTY_ARRAY = "'{}'".freeze
       EMPTY_BRACKET = '[]'.freeze
       OPEN_BRACKET = '['.freeze
       CLOSE_BRACKET = ']'.freeze
@@ -115,8 +104,8 @@ module Sequel
       NULL = 'NULL'.freeze
       QUOTE = '"'.freeze
 
-      # Hash of database array type name strings to symbols (e.g. 'double precision' => :float),
-      # used by the schema parsing.
+      # Global hash of database array type name strings to symbols (e.g. 'double precision' => :float),
+      # used by the schema parsing for array types registered globally.
       ARRAY_TYPES = {}
 
       # Registers an array type that the extension should handle.  Makes a Database instance that
@@ -149,20 +138,18 @@ module Sequel
       # :type_symbol :: The base of the schema type symbol for this type.  For example, if you provide
       #                 :integer, Sequel will recognize this type as :integer_array during schema parsing.
       #                 Defaults to the db_type argument.
-      # :typecast_method :: If given, specifies the :type_symbol option, but additionally causes no
-      #                     typecasting method to be created in the database.  This should only be used
-      #                     to alias existing array types.  For example, if there is an array type that can be
-      #                     treated just like an integer array, you can do :typecast_method=>:integer.
+      # :typecast_method_map :: The map in which to place the database type string to type symbol mapping.
+      #                         Defaults to ARRAY_TYPES.
       # :typecast_methods_module :: If given, a module object to add the typecasting method to.  Defaults
       #                             to DatabaseMethods.
       #
       # If a block is given, it is treated as the :converter option.
-      def self.register(db_type, opts={}, &block)
+      def self.register(db_type, opts=OPTS, &block)
         db_type = db_type.to_s
-        typecast_method = opts[:typecast_method]
-        type = (typecast_method || opts[:type_symbol] || db_type).to_sym
+        type = (opts[:type_symbol] || db_type).to_sym
         type_procs = opts[:type_procs] || PG_TYPES
         mod = opts[:typecast_methods_module] || DatabaseMethods
+        typecast_method_map = opts[:typecast_method_map] || ARRAY_TYPES
 
         if converter = opts[:converter]
           raise Error, "can't provide both a block and :converter option to register" if block
@@ -172,15 +159,15 @@ module Sequel
 
         if soid = opts[:scalar_oid]
           raise Error, "can't provide both a converter and :scalar_oid option to register" if converter 
-          raise Error, "no conversion proc for :scalar_oid=>#{soid.inspect}" unless converter = type_procs[soid]
+          converter = type_procs[soid]
         end
 
         array_type = (opts[:array_type] || db_type).to_s.dup.freeze
         creator = (opts[:parser] == :json ? JSONCreator : Creator).new(array_type, converter)
 
-        ARRAY_TYPES[db_type] = :"#{type}_array"
+        typecast_method_map[db_type] = :"#{type}_array"
 
-        define_array_typecast_method(mod, type, creator, opts.fetch(:scalar_typecast, type)) unless typecast_method
+        define_array_typecast_method(mod, type, creator, opts.fetch(:scalar_typecast, type))
 
         if oid = opts[:oid]
           type_procs[oid] = creator
@@ -208,6 +195,21 @@ module Sequel
         ESCAPE_REPLACEMENT = '\\\\\1'.freeze
         BLOB_RANGE = 1...-1
 
+        # Create the local hash of database type strings to schema type symbols,
+        # used for array types local to this database.
+        def self.extended(db)
+          db.instance_eval do
+            @pg_array_schema_types ||= {}
+            procs = conversion_procs
+            procs[1115] = Creator.new("timestamp without time zone", procs[1114])
+            procs[1185] = Creator.new("timestamp with time zone", procs[1184])
+            copy_conversion_procs([143, 791, 1000, 1001, 1003, 1005, 1006, 1007, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1021, 1022, 1028, 1182, 1183, 1231, 1270, 1561, 1563, 2951])
+            [:string_array, :integer_array, :decimal_array, :float_array, :boolean_array, :blob_array, :date_array, :time_array, :datetime_array].each do |v|
+              @schema_type_classes[v] = PGArray
+            end
+          end
+        end
+
         # Handle arrays in bound variables
         def bound_variable_arg(arg, conn)
           case arg
@@ -220,13 +222,25 @@ module Sequel
           end
         end
 
-        # Make the column type detection handle registered array types.
-        def schema_column_type(db_type)
-          if (db_type =~ /\A([^(]+)(?:\([^(]+\))?\[\]\z/io) && (type = ARRAY_TYPES[$1])
-            type
-          else
-            super
+        # Register a database specific array type.  This can be used to support
+        # different array types per Database.  Use of this method does not
+        # affect global state, unlike PGArray.register.  See PGArray.register for
+        # possible options.
+        def register_array_type(db_type, opts=OPTS, &block)
+          opts = {:type_procs=>conversion_procs, :typecast_method_map=>@pg_array_schema_types, :typecast_methods_module=>(class << self; self; end)}.merge!(opts)
+          unless (opts.has_key?(:scalar_oid) || block) && opts.has_key?(:oid)
+            array_oid, scalar_oid = from(:pg_type).where(:typname=>db_type.to_s).get([:typarray, :oid])
+            opts[:scalar_oid] = scalar_oid unless opts.has_key?(:scalar_oid) || block
+            opts[:oid] = array_oid unless opts.has_key?(:oid)
           end
+          PGArray.register(db_type, opts, &block)
+          @schema_type_classes[:"#{opts[:type_symbol] || db_type}_array"] = PGArray
+          conversion_procs_updated
+        end
+
+        # Return PGArray if this type matches any supported array type.
+        def schema_type_class(type)
+          super || (ARRAY_TYPES.each_value{|v| return PGArray if type == v}; nil)
         end
 
         private
@@ -247,6 +261,17 @@ module Sequel
           end
         end
 
+        # Automatically handle array types for the given named types. 
+        def convert_named_procs_to_procs(named_procs)
+          h = super
+          unless h.empty?
+            from(:pg_type).where(:oid=>h.keys).select_map([:typname, :oid, :typarray]).each do |name, scalar_oid, array_oid|
+              register_array_type(name, :type_procs=>h, :oid=>array_oid.to_i, :scalar_oid=>scalar_oid.to_i)
+            end
+          end
+          h
+        end
+
         # Manually override the typecasting for timestamp array types so that
         # they use the database's timezone instead of the global Sequel
         # timezone.
@@ -259,6 +284,31 @@ module Sequel
           procs
         end
 
+        # Look into both the current database's array schema types and the global
+        # array schema types to get the type symbol for the given database type
+        # string.
+        def pg_array_schema_type(type)
+          @pg_array_schema_types[type] || ARRAY_TYPES[type]
+        end
+
+        # Make the column type detection handle registered array types.
+        def schema_column_type(db_type)
+          if (db_type =~ /\A([^(]+)(?:\([^(]+\))?\[\]\z/io) && (type = pg_array_schema_type($1))
+            type
+          else
+            super
+          end
+        end
+
+        # Convert ruby arrays to PostgreSQL arrays when used as default values.
+        def column_definition_default_sql(sql, column)
+          if (d = column[:default]) && d.is_a?(Array) && !Sequel.condition_specifier?(d)
+            sql << " DEFAULT (#{literal(Sequel.pg_array(d))}::#{type_literal(column)})"
+          else
+            super
+          end
+        end
+
         # Given a value to typecast and the type of PGArray subclass:
         # * If given a PGArray with a matching array_type, use it directly.
         # * If given a PGArray with a different array_type, return a PGArray
@@ -267,7 +317,6 @@ module Sequel
         #   typecast all members of the array in ruby for performance reasons, but
         #   it will cast the array the appropriate database type when the array is
         #   literalized.
-        # * If given a String, call the parser for the subclass with it.
         def typecast_value_pg_array(value, creator, scalar_typecast_method=nil)
           case value
           when PGArray
@@ -287,45 +336,26 @@ module Sequel
         end
       end
 
-      # PostgreSQL array parser that handles all types of input.
-      #
-      # This parser is very simple and unoptimized, but should still
-      # be O(n) where n is the length of the input string.
-      class Parser
-        # Current position in the input string.
-        attr_reader :pos
+      # PostgreSQL array parser that handles PostgreSQL array output format.
+      # Note that does not handle all forms out input that PostgreSQL will
+      # accept, and it will not raise an error for all forms of invalid input.
+      class Parser < StringScanner
+        UNQUOTED_RE = /[{}",]|[^{}",]+/
+        QUOTED_RE = /["\\]|[^"\\]+/
+        NULL_RE = /NULL",/
+        OPEN_RE = /\{/
 
         # Set the source for the input, and any converter callable
         # to call with objects to be created.  For nested parsers
         # the source may contain text after the end current parse,
         # which will be ignored.
         def initialize(source, converter=nil)
-          @source = source
-          @source_length = source.length
+          super(source)
           @converter = converter 
-          @pos = -1
-          @entries = []
+          @stack = [[]]
           @recorded = ""
-          @dimension = 0
         end
 
-        # Return 2 objects, whether the next character in the input
-        # was escaped with a backslash, and what the next character is.
-        def next_char
-          @pos += 1
-          if (c = @source[@pos..@pos]) == BACKSLASH
-            @pos += 1
-            [true, @source[@pos..@pos]]
-          else
-            [false, c]
-          end
-        end
-
-        # Add a new character to the buffer of recorded characters.
-        def record(c)
-          @recorded << c
-        end
-        
         # Take the buffer of recorded characters and add it to the array
         # of entries, and use a new buffer for recorded characters.
         def new_entry(include_empty=false)
@@ -336,53 +366,65 @@ module Sequel
             elsif @converter
               entry = @converter.call(entry)
             end
-            @entries.push(entry)
+            @stack.last.push(entry)
             @recorded = ""
           end
         end
 
         # Parse the input character by character, returning an array
         # of parsed (and potentially converted) objects.
-        def parse(nested=false)
-          # quote sets whether we are inside of a quoted string.
-          quote = false
-          until @pos >= @source_length
-            escaped, char = next_char
-            if char == OPEN_BRACE && !quote
-              @dimension += 1
-              if (@dimension > 1)
-                # Multi-dimensional array encounter, use a subparser
-                # to parse the next level down.
-                subparser = self.class.new(@source[@pos..-1], @converter)
-                @entries.push(subparser.parse(true))
-                @pos += subparser.pos - 1
-              end
-            elsif char == CLOSE_BRACE && !quote
-              @dimension -= 1
-              if (@dimension == 0)
-                new_entry
-                # Exit early if inside a subparser, since the
-                # text after parsing the current level should be
-                # ignored as it is handled by the parent parser.
-                return @entries if nested
-              end
-            elsif char == QUOTE && !escaped
-              # If already inside the quoted string, this is the
-              # ending quote, so add the entry.  Otherwise, this
-              # is the opening quote, so set the quote flag.
-              new_entry(true) if quote
-              quote = !quote
-            elsif char == COMMA && !quote
-              # If not inside a string and a comma occurs, it indicates
-              # the end of the entry, so add the entry.
+        def parse
+          raise Sequel::Error, "invalid array, empty string" if eos?
+          raise Sequel::Error, "invalid array, doesn't start with {" unless scan(OPEN_RE)
+
+          while !eos?
+            char = scan(UNQUOTED_RE)
+            if char == COMMA
+              # Comma outside quoted string indicates end of current entry
               new_entry
+            elsif char == QUOTE
+              raise Sequel::Error, "invalid array, opening quote with existing recorded data" unless @recorded.empty?
+              while true
+                char = scan(QUOTED_RE)
+                if char == BACKSLASH
+                  @recorded << getch
+                elsif char == QUOTE
+                  n = peek(1)
+                  raise Sequel::Error, "invalid array, closing quote not followed by comma or closing brace" unless n == COMMA || n == CLOSE_BRACE
+                  break
+                else
+                  @recorded << char
+                end
+              end
+              new_entry(true)
+            elsif char == OPEN_BRACE
+              raise Sequel::Error, "invalid array, opening brace with existing recorded data" unless @recorded.empty?
+
+              # Start of new array, add it to the stack
+              new = []
+              @stack.last << new
+              @stack << new
+            elsif char == CLOSE_BRACE
+              # End of current array, add current entry to the current array
+              new_entry
+
+              if @stack.length == 1
+                raise Sequel::Error, "array parsing finished without parsing entire string" unless eos?
+
+                # Top level of array, parsing should be over.
+                # Pop current array off stack and return it as result
+                return @stack.pop
+              else
+                # Nested array, pop current array off stack
+                @stack.pop
+              end
             else
               # Add the character to the recorded character buffer.
-              record(char)
+              @recorded << char
             end
           end
-          raise Sequel::Error, "array dimensions not balanced" unless @dimension == 0
-          @entries
+
+          raise Sequel::Error, "array parsing finished with array unclosed"
         end
       end unless Sequel::Postgres.respond_to?(:parse_pg_array)
 
@@ -455,9 +497,14 @@ module Sequel
       # If the receiver has a type, add a cast to the
       # database array type.
       def sql_literal_append(ds, sql)
-        sql << ARRAY
-        _literal_append(sql, ds, to_a)
-        if at = array_type
+        at = array_type
+        if empty? && at
+          sql << EMPTY_ARRAY
+        else
+          sql << ARRAY
+          _literal_append(sql, ds, to_a)
+        end
+        if at
           sql << DOUBLE_COLON << at.to_s << EMPTY_BRACKET
         end
       end
@@ -499,11 +546,25 @@ module Sequel
       register('time with time zone', :oid=>1270, :scalar_oid=>1083, :type_symbol=>:time_timezone, :scalar_typecast=>:time)
       register('timestamp with time zone', :oid=>1185, :scalar_oid=>1184, :type_symbol=>:datetime_timezone, :scalar_typecast=>:datetime)
 
-      register('smallint', :oid=>1005, :parser=>:json, :typecast_method=>:integer)
-      register('oid', :oid=>1028, :parser=>:json, :typecast_method=>:integer)
-      register('real', :oid=>1021, :scalar_oid=>701, :typecast_method=>:float)
-      register('character', :oid=>1014, :array_type=>:text, :typecast_method=>:string)
-      register('character varying', :oid=>1015, :typecast_method=>:string)
+      register('smallint', :oid=>1005, :parser=>:json, :scalar_typecast=>:integer)
+      register('oid', :oid=>1028, :parser=>:json, :scalar_typecast=>:integer)
+      register('real', :oid=>1021, :scalar_oid=>700, :scalar_typecast=>:float)
+      register('character', :oid=>1014, :array_type=>:text, :scalar_typecast=>:string)
+      register('character varying', :oid=>1015, :scalar_typecast=>:string, :type_symbol=>:varchar)
+
+      register('xml', :oid=>143, :scalar_oid=>142)
+      register('money', :oid=>791, :scalar_oid=>790)
+      register('bit', :oid=>1561, :scalar_oid=>1560)
+      register('bit varying', :oid=>1563, :scalar_oid=>1562, :type_symbol=>:varbit)
+      register('uuid', :oid=>2951, :scalar_oid=>2950)
+
+      register('xid', :oid=>1011, :scalar_oid=>28)
+      register('cid', :oid=>1012, :scalar_oid=>29)
+
+      register('name', :oid=>1003, :scalar_oid=>19)
+      register('tid', :oid=>1010, :scalar_oid=>27)
+      register('int2vector', :oid=>1006, :scalar_oid=>22)
+      register('oidvector', :oid=>1013, :scalar_oid=>30)
     end
   end
 

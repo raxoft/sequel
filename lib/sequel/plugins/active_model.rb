@@ -4,7 +4,7 @@ module Sequel
     # The ActiveModel plugin makes Sequel::Model objects
     # pass the ActiveModel::Lint tests, which should
     # hopefully mean full ActiveModel compliance.  This should
-    # allow the full support of Sequel::Model objects in Rails 3.
+    # allow the full support of Sequel::Model objects in Rails 3+.
     # This plugin requires active_model in order to use
     # ActiveModel::Naming.
     # 
@@ -16,6 +16,14 @@ module Sequel
     #   # Make the Album class active_model compliant
     #   Album.plugin :active_model
     module ActiveModel
+      # ActiveModel compliant error class
+      class Errors < Sequel::Model::Errors
+        # Add autovivification so that #[] always returns an array.
+        def [](k)
+          fetch(k){self[k] = []}
+        end
+      end
+
       module ClassMethods
         include ::ActiveModel::Naming
         
@@ -35,7 +43,19 @@ module Sequel
           super
           @destroyed = true
         end
-        
+
+        # Mark current instance as destroyed if the transaction in which this
+        # instance is created is rolled back.
+        def before_create
+          db.after_rollback{@destroyed = true}
+          super
+        end
+
+        # Return ::ActiveModel::Name instance for the class.
+        def model_name
+          model.model_name
+        end
+
         # False if the object is new? or has been destroyed, true otherwise.
         def persisted?
           !new? && @destroyed != true
@@ -70,6 +90,11 @@ module Sequel
         end
         
         private
+
+        # Use ActiveModel compliant errors class.
+        def errors_class
+          Errors
+        end
         
         # The string to use to join composite primary key param strings.
         def to_param_joiner

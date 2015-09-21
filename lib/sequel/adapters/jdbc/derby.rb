@@ -1,11 +1,21 @@
+Sequel::JDBC.load_driver('org.apache.derby.jdbc.EmbeddedDriver', :Derby)
 Sequel.require 'adapters/jdbc/transactions'
 
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:derby] = proc do |db|
+        db.extend(Sequel::JDBC::Derby::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::Derby::Dataset
+        org.apache.derby.jdbc.EmbeddedDriver
+      end
+    end
+
     # Database and Dataset support for Derby databases accessed via JDBC.
     module Derby
       # Instance methods for Derby Database objects accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         PRIMARY_KEY_INDEX_RE = /\Asql\d+\z/i.freeze
 
         include ::Sequel::JDBC::Transactions
@@ -116,12 +126,12 @@ module Sequel
         end
 
         # Use IDENTITY_VAL_LOCAL() to get the last inserted id.
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           statement(conn) do |stmt|
             sql = 'SELECT IDENTITY_VAL_LOCAL() FROM sysibm.sysdummy1'
             rs = log_yield(sql){stmt.executeQuery(sql)}
             rs.next
-            rs.getInt(1)
+            rs.getLong(1)
           end
         end
 
@@ -172,8 +182,6 @@ module Sequel
         PAREN_OPEN = Dataset::PAREN_OPEN
         OFFSET = Dataset::OFFSET
         CAST_STRING_OPEN = "RTRIM(".freeze
-        BITCOMP_OPEN = "((0 - ".freeze
-        BITCOMP_CLOSE = ") - 1)".freeze
         BLOB_OPEN = "CAST(X'".freeze
         BLOB_CLOSE = "' AS BLOB)".freeze
         HSTAR = "H*".freeze
@@ -186,7 +194,6 @@ module Sequel
         BOOL_FALSE_OLD = '(1 = 0)'.freeze
         BOOL_TRUE = 'TRUE'.freeze
         BOOL_FALSE = 'FALSE'.freeze
-        SELECT_CLAUSE_METHODS = clause_methods(:select, %w'select distinct columns from join where group having compounds order limit lock')
         EMULATED_FUNCTION_MAP = {:char_length=>'length'.freeze}
 
         # Derby doesn't support an expression between CASE and WHEN,
@@ -211,14 +218,10 @@ module Sequel
 
         def complex_expression_sql_append(sql, op, args)
           case op
-          when :%
-            sql << complex_expression_arg_pairs(args){|a, b| "MOD(#{literal(a)}, #{literal(b)})"}
+          when :%, :'B~'
+            complex_expression_emulate_append(sql, op, args)
           when :&, :|, :^, :<<, :>>
             raise Error, "Derby doesn't support the #{op} operator"
-          when :'B~'
-            sql << BITCOMP_OPEN
-            literal_append(sql, args.at(0))
-            sql << BITCOMP_CLOSE
           when :extract
             sql << args.at(0).to_s << PAREN_OPEN
             literal_append(sql, args.at(1))
@@ -245,23 +248,10 @@ module Sequel
 
         private
 
-        JAVA_SQL_CLOB         = Java::JavaSQL::Clob
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def derby_clob(v) v.getSubString(1, v.length) end
+        def empty_from_sql
+          DEFAULT_FROM
         end
 
-        DERBY_CLOB_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:derby_clob)
-      
-        # Handle clobs on Derby as strings.
-        def convert_type_proc(v)
-          if v.is_a?(JAVA_SQL_CLOB)
-            DERBY_CLOB_METHOD
-          else
-            super
-          end
-        end
-        
         # Derby needs a hex string casted to BLOB for blobs.
         def literal_blob_append(sql, v)
           sql << BLOB_OPEN << v.unpack(HSTAR).first << BLOB_CLOSE
@@ -298,18 +288,9 @@ module Sequel
           end
         end
 
-        # Derby doesn't support common table expressions.
-        def select_clause_methods
-          SELECT_CLAUSE_METHODS
-        end
-
-        # Use a default FROM table if the dataset does not contain a FROM table.
-        def select_from_sql(sql)
-          if @opts[:from]
-            super
-          else
-            sql << DEFAULT_FROM
-          end
+        # Derby supports multiple rows in INSERT.
+        def multi_insert_sql_strategy
+          :values
         end
 
         # Offset comes before limit in Derby

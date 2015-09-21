@@ -84,6 +84,7 @@ module Sequel
       end      
 
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::Access::DatabaseMethods
         include Sequel::Database::SplitAlterTable
     
@@ -105,10 +106,10 @@ module Sequel
           super
         end
 
-        def execute_insert(sql, opts={})
+        def execute_insert(sql, opts=OPTS)
           synchronize(opts[:server]) do |conn|
             begin
-              r = log_yield(sql){conn.Execute(sql)}
+              log_yield(sql){conn.Execute(sql)}
               res = log_yield(LAST_INSERT_ID){conn.Execute(LAST_INSERT_ID)}
               res.getRows.transpose.each{|r| return r.shift}
             rescue ::WIN32OLERuntimeError => e
@@ -118,18 +119,18 @@ module Sequel
           nil
         end
 
-        def tables(opts={})
+        def tables(opts=OPTS)
           m = output_identifier_meth
           ado_schema_tables.map {|tbl| m.call(tbl['TABLE_NAME'])}
         end
 
-        def views(opts={})
+        def views(opts=OPTS)
           m = output_identifier_meth
           ado_schema_views.map {|tbl| m.call(tbl['TABLE_NAME'])}
         end
         
         # Note OpenSchema returns compound indexes as multiple rows
-        def indexes(table_name,opts={})
+        def indexes(table_name,opts=OPTS)
           m = output_identifier_meth
           idxs = ado_schema_indexes(table_name).inject({}) do |memo, idx|
             unless idx["PRIMARY_KEY"]
@@ -144,7 +145,7 @@ module Sequel
         end
 
         # Note OpenSchema returns compound foreign key relationships as multiple rows
-        def foreign_key_list(table, opts={})
+        def foreign_key_list(table, opts=OPTS)
           m = output_identifier_meth
           fks = ado_schema_foreign_keys(table).inject({}) do |memo, fk|
             name = m.call(fk['FK_NAME'])
@@ -199,15 +200,15 @@ module Sequel
           end
         end
 
-        def begin_transaction(conn, opts={})
+        def begin_transaction(conn, opts=OPTS)
           log_yield('Transaction.begin'){conn.BeginTrans}
         end
           
-        def commit_transaction(conn, opts={})
+        def commit_transaction(conn, opts=OPTS)
           log_yield('Transaction.commit'){conn.CommitTrans}
         end
           
-        def rollback_transaction(conn, opts={})
+        def rollback_transaction(conn, opts=OPTS)
           log_yield('Transaction.rollback'){conn.RollbackTrans}
         end
           
@@ -293,7 +294,7 @@ module Sequel
         
         def fetch_ado_schema(type, criteria=[])
           execute_open_ado_schema(type, criteria) do |s|
-            cols = s.Fields.extend(Enumerable).map {|c| c.Name}
+            cols = s.Fields.extend(Enumerable).map(&:Name)
             s.getRows.transpose.each do |r|
               row = {}
               cols.each{|c| row[c] = r.shift}

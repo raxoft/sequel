@@ -35,6 +35,15 @@ module Sequel
         # reteived via Dataset#all.
         attr_accessor :retrieved_with
 
+        # Remove retrieved_by and retrieved_with when marshalling.  retrieved_by
+        # contains unmarshallable objects, and retrieved_with can be very large
+        # and is not helpful without retrieved_by.
+        def marshallable!
+          @retrieved_by = nil
+          @retrieved_with = nil
+          super
+        end
+
         private
 
         # If there the association is not in the associations cache and the object
@@ -42,9 +51,9 @@ module Sequel
         # objects retrieved with the current object.
         def load_associated_objects(opts, reload=false)
           name = opts[:name]
-          if !associations.include?(name) && retrieved_by
+          if !associations.include?(name) && retrieved_by && !frozen?
             begin
-              retrieved_by.send(:eager_load, retrieved_with, name=>{})
+              retrieved_by.send(:eager_load, retrieved_with.reject(&:frozen?), name=>{})
             rescue Sequel::UndefinedAssociation
               # This can happen if class table inheritance is used and the association
               # is only defined in a subclass.  This particular instance can use the

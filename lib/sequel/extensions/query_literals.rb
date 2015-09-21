@@ -24,13 +24,14 @@
 # You can load this extension into specific datasets:
 #
 #   ds = DB[:table]
-#   ds.extension(:query_literals)
+#   ds = ds.extension(:query_literals)
 #
 # Or you can load it into all of a database's datasets, which
 # is probably the desired behavior if you are using this extension:
 #
 #   DB.extension(:query_literals)
 
+#
 module Sequel
   # The QueryLiterals module can be used to make select, group, and
   # order methods operate similar to the filter methods if the first
@@ -44,7 +45,7 @@ module Sequel
   # Note that if you pass a block to these methods, it will use the default
   # implementation without the special literal handling.
   module QueryLiterals
-    %w'select select_append select_group select_more group group_and_count order order_append order_more'.each do |m|
+    %w'select select_append select_group select_more group group_and_count group_append order order_append order_more'.each do |m|
       class_eval(<<-END, __FILE__, __LINE__ + 1)
         def #{m}(*args)
           if !block_given? && (l = query_literal(args))

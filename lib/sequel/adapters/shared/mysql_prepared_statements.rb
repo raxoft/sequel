@@ -6,7 +6,7 @@ module Sequel
     # prepared statements and stored procedures.
     module PreparedStatements
       module DatabaseMethods
-        disconnect_errors = <<-END.split("\n").map{|l| l.strip}
+        disconnect_errors = <<-END.split("\n").map(&:strip)
         Commands out of sync; you can't run this command now
         Can't connect to local MySQL server through socket
         MySQL server has gone away
@@ -18,14 +18,14 @@ module Sequel
         MYSQL_DATABASE_DISCONNECT_ERRORS = /\A#{Regexp.union(disconnect_errors)}/o
        
         # Support stored procedures on MySQL
-        def call_sproc(name, opts={}, &block)
+        def call_sproc(name, opts=OPTS, &block)
           args = opts[:args] || [] 
           execute("CALL #{name}#{args.empty? ? '()' : literal(args)}", opts.merge(:sproc=>false), &block)
         end
         
         # Executes the given SQL using an available connection, yielding the
         # connection if the block is given.
-        def execute(sql, opts={}, &block)
+        def execute(sql, opts=OPTS, &block)
           if opts[:sproc]
             call_sproc(sql, opts, &block)
           elsif sql.is_a?(Symbol)
@@ -100,51 +100,19 @@ module Sequel
           end
         end
         
-        # Methods for MySQL prepared statements using the native driver.
-        module PreparedStatementMethods
-          include Sequel::Dataset::UnnumberedArgumentMapper
-          
-          # Raise a more obvious error if you attempt to call a unnamed prepared statement.
-          def call(*)
-            raise Error, "Cannot call prepared statement without a name" if prepared_statement_name.nil?
-            super
-          end
-          
-          private
-          
-          # Execute the prepared statement with the bind arguments instead of
-          # the given SQL.
-          def execute(sql, opts={}, &block)
-            super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-          end
-          
-          # Same as execute, explicit due to intricacies of alias and super.
-          def execute_dui(sql, opts={}, &block)
-            super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-          end
-          
-          # Same as execute, explicit due to intricacies of alias and super.
-          def execute_insert(sql, opts={}, &block)
-            super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-          end
+        PreparedStatementMethods = Sequel::Dataset.send(:prepared_statements_module,
+          :prepare_bind,
+          Sequel::Dataset::UnnumberedArgumentMapper) do
+            # Raise a more obvious error if you attempt to call a unnamed prepared statement.
+            def call(*)
+              raise Error, "Cannot call prepared statement without a name" if prepared_statement_name.nil?
+              super
+            end
         end
         
-        # Methods for MySQL stored procedures using the native driver.
-        module StoredProcedureMethods
-          include Sequel::Dataset::StoredProcedureMethods
-          
-          private
-          
-          # Execute the database stored procedure with the stored arguments.
-          def execute(sql, opts={}, &block)
-            super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
-          end
-          
-          # Same as execute, explicit due to intricacies of alias and super.
-          def execute_dui(sql, opts={}, &block)
-            super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
-          end
-        end
+        StoredProcedureMethods = Sequel::Dataset.send(:prepared_statements_module,
+          "sql = @sproc_name; opts = Hash[opts]; opts[:args] = @sproc_args; opts[:sproc] = true",
+          Sequel::Dataset::StoredProcedureMethods, %w'execute execute_dui')
         
         # MySQL is different in that it supports prepared statements but not bound
         # variables outside of prepared statements.  The default implementation

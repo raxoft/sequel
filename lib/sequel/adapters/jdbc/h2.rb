@@ -1,15 +1,26 @@
+Sequel::JDBC.load_driver('org.h2.Driver', :H2)
+
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:h2] = proc do |db|
+        db.extend(Sequel::JDBC::H2::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::H2::Dataset
+        org.h2.Driver
+      end
+    end
+
     # Database and Dataset support for H2 databases accessed via JDBC.
     module H2
       # Instance methods for H2 Database objects accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         PRIMARY_KEY_INDEX_RE = /\Aprimary_key/i.freeze
       
         # Commit an existing prepared transaction with the given transaction
         # identifier string.
-        def commit_prepared_transaction(transaction_id)
-          run("COMMIT TRANSACTION #{transaction_id}")
+        def commit_prepared_transaction(transaction_id, opts=OPTS)
+          run("COMMIT TRANSACTION #{transaction_id}", opts)
         end
 
         # H2 uses the :h2 database type.
@@ -19,8 +30,8 @@ module Sequel
 
         # Rollback an existing prepared transaction with the given transaction
         # identifier string.
-        def rollback_prepared_transaction(transaction_id)
-          run("ROLLBACK TRANSACTION #{transaction_id}")
+        def rollback_prepared_transaction(transaction_id, opts=OPTS)
+          run("ROLLBACK TRANSACTION #{transaction_id}", opts)
         end
 
         # H2 uses an IDENTITY type
@@ -47,8 +58,8 @@ module Sequel
         
         # If the :prepare option is given and we aren't in a savepoint,
         # prepare the transaction for a two-phase commit.
-        def commit_transaction(conn, opts={})
-          if (s = opts[:prepare]) && _trans(conn)[:savepoint_level] <= 1
+        def commit_transaction(conn, opts=OPTS)
+          if (s = opts[:prepare]) && savepoint_level(conn) <= 1
             log_connection_execute(conn, "PREPARE COMMIT #{s}")
           else
             super
@@ -61,7 +72,7 @@ module Sequel
           when :add_column
             if (pk = op.delete(:primary_key)) || (ref = op.delete(:table))
               sqls = [super(table, op)]
-              sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})" if pk
+              sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})" if pk && op[:type] != :identity
               if ref
                 op[:table] = ref
                 sqls << "ALTER TABLE #{quote_schema_table(table)} ADD FOREIGN KEY (#{quote_identifier(op[:name])}) #{column_references_sql(op)}"
@@ -85,6 +96,12 @@ module Sequel
             sql = "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
             column_definition_order.each{|m| send(:"column_definition_#{m}_sql", sql, op)}
             sql
+          when :drop_constraint
+            if op[:type] == :primary_key
+              "ALTER TABLE #{quote_schema_table(table)} DROP PRIMARY KEY"
+            else
+              super(table, op)
+            end
           else
             super(table, op)
           end
@@ -108,17 +125,22 @@ module Sequel
         end
 
         # Use IDENTITY() to get the last inserted id.
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           statement(conn) do |stmt|
             sql = 'SELECT IDENTITY();'
             rs = log_yield(sql){stmt.executeQuery(sql)}
             rs.next
-            rs.getInt(1)
+            rs.getLong(1)
           end
         end
         
         def primary_key_index_re
           PRIMARY_KEY_INDEX_RE
+        end
+
+        # H2 does not support named column constraints.
+        def supports_named_column_constraints?
+          false
         end
 
         # Use BIGINT IDENTITY for identity columns that use bigint, fixes
@@ -130,35 +152,29 @@ module Sequel
       
       # Dataset class for H2 datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        SELECT_CLAUSE_METHODS = clause_methods(:select, %w'select distinct columns from join where group having compounds order limit')
-        BITWISE_METHOD_MAP = {:& =>:BITAND, :| => :BITOR, :^ => :BITXOR}
         APOS = Dataset::APOS
         HSTAR = "H*".freeze
-        BITCOMP_OPEN = "((0 - ".freeze
-        BITCOMP_CLOSE = ") - 1)".freeze
         ILIKE_PLACEHOLDER = ["CAST(".freeze, " AS VARCHAR_IGNORECASE)".freeze].freeze
         TIME_FORMAT = "'%H:%M:%S'".freeze
-        
+        ONLY_OFFSET = " LIMIT -1 OFFSET ".freeze
+
         # Emulate the case insensitive LIKE operator and the bitwise operators.
         def complex_expression_sql_append(sql, op, args)
           case op
           when :ILIKE, :"NOT ILIKE"
             super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), [SQL::PlaceholderLiteralString.new(ILIKE_PLACEHOLDER, [args.at(0)]), args.at(1)])
-          when :&, :|, :^
-            sql << complex_expression_arg_pairs(args){|a, b| literal(SQL::Function.new(BITWISE_METHOD_MAP[op], a, b))}
-          when :<<
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} * POWER(2, #{literal(b)}))"}
-          when :>>
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} / POWER(2, #{literal(b)}))"}
-          when :'B~'
-            sql << BITCOMP_OPEN
-            literal_append(sql, args.at(0))
-            sql << BITCOMP_CLOSE
+          when :&, :|, :^, :<<, :>>, :'B~'
+            complex_expression_emulate_append(sql, op, args)
           else
             super
           end
         end
         
+        # H2 does not support derived column lists
+        def supports_derived_column_lists?
+          false
+        end
+
         # H2 requires SQL standard datetimes
         def requires_sql_standard_datetimes?
           true
@@ -181,23 +197,6 @@ module Sequel
 
         private
 
-        #JAVA_H2_CLOB = Java::OrgH2Jdbc::JdbcClob
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def h2_clob(v) v.getSubString(1, v.length) end
-        end
-
-        H2_CLOB_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:h2_clob)
-      
-        # Handle H2 specific clobs as strings.
-        def convert_type_proc(v)
-          if v.is_a?(Java::OrgH2Jdbc::JdbcClob)
-            H2_CLOB_METHOD
-          else
-            super
-          end
-        end
-        
         # H2 expects hexadecimal strings for blob values
         def literal_blob_append(sql, v)
           sql << APOS << v.unpack(HSTAR).first << APOS
@@ -208,8 +207,19 @@ module Sequel
           v.strftime(TIME_FORMAT)
         end
 
-        def select_clause_methods
-          SELECT_CLAUSE_METHODS
+        # H2 supports multiple rows in INSERT.
+        def multi_insert_sql_strategy
+          :values
+        end
+
+        def select_only_offset_sql(sql)
+          sql << ONLY_OFFSET
+          literal_append(sql, @opts[:offset])
+        end
+
+        # H2 supports quoted function names.
+        def supports_quoted_function_names?
+          true
         end
       end
     end

@@ -70,8 +70,8 @@
 # length_range 3...5 :: CHECK char_length(column) >= 3 AND char_length(column) < 5
 # format /foo\\d+/ :: CHECK column ~ 'foo\\d+'
 # format /foo\\d+/i :: CHECK column ~* 'foo\\d+'
-# like 'foo%' :: CHECK column LIKE 'foo%'
-# ilike 'foo%' :: CHECK column ILIKE 'foo%'
+# like 'foo%' :: CHECK column LIKE 'foo%' ESCAPE '\'
+# ilike 'foo%' :: CHECK column ILIKE 'foo%' ESCAPE '\'
 # includes ['a', 'b'] :: CHECK column IN ('a', 'b')
 # includes [1, 2] :: CHECK column IN (1, 2)
 # includes 3..5 :: CHECK column >= 3 AND column <= 5
@@ -122,6 +122,7 @@
 #   readd all constraints you want to use inside the alter table block,
 #   making no other changes inside the alter_table block.
 
+#
 module Sequel
   module ConstraintValidations
     # The default table name used for the validation metadata.
@@ -144,8 +145,8 @@ module Sequel
       # Create constraint validation methods that don't take an argument 
       %w'presence unique'.each do |v|
         class_eval(<<-END, __FILE__, __LINE__+1)
-          def #{v}(columns, opts={})
-            @generator.validation({:type=>:#{v}, :columns=>Array(columns)}.merge(opts))
+          def #{v}(columns, opts=OPTS)
+            @generator.validation({:type=>:#{v}, :columns=>Array(columns)}.merge!(opts))
           end
         END
       end
@@ -153,8 +154,8 @@ module Sequel
       # Create constraint validation methods that take an argument 
       %w'exact_length min_length max_length length_range format like ilike includes'.each do |v|
         class_eval(<<-END, __FILE__, __LINE__+1)
-          def #{v}(arg, columns, opts={})
-            @generator.validation({:type=>:#{v}, :columns=>Array(columns), :arg=>arg}.merge(opts))
+          def #{v}(arg, columns, opts=OPTS)
+            @generator.validation({:type=>:#{v}, :columns=>Array(columns), :arg=>arg}.merge!(opts))
           end
         END
       end
@@ -223,6 +224,16 @@ module Sequel
       end
     end
 
+    # Modify the default create_table generator to include
+    # the constraint validation methods.
+    def create_table_generator(&block)
+      super do
+        extend CreateTableGeneratorMethods
+        @validations = []
+        instance_eval(&block) if block
+      end
+    end
+
     # Drop the constraint validations table.
     def drop_constraint_validations_table
       drop_table(constraint_validations_table)
@@ -244,7 +255,7 @@ module Sequel
     # the related metadata, it could make it impossible to save
     # rows, since a validation for a nonexistent column will be
     # created.
-    def drop_constraint_validations_for(opts={})
+    def drop_constraint_validations_for(opts=OPTS)
       ds = from(constraint_validations_table)
       if table = opts[:table]
         ds = ds.where(:table=>constraint_validations_literal_table(table))
@@ -261,9 +272,7 @@ module Sequel
       ds.delete
     end
 
-    private
-
-    # Modify the default create_table generator to include
+    # Modify the default alter_table generator to include
     # the constraint validation methods.
     def alter_table_generator(&block)
       super do
@@ -272,6 +281,8 @@ module Sequel
         instance_eval(&block) if block
       end
     end
+
+    private
 
     # After running all of the table alteration statements,
     # if there were any constraint validations, run table alteration
@@ -316,16 +327,6 @@ module Sequel
       super
     end
 
-    # Modify the default create_table generator to include
-    # the constraint validation methods.
-    def create_table_generator(&block)
-      super do
-        extend CreateTableGeneratorMethods
-        @validations = []
-        instance_eval(&block) if block
-      end
-    end
-
     # For the given table, generator, and validations, add constraints
     # to the generator for each of the validations, as well as adding
     # validation metadata to the constraint validations table.
@@ -357,7 +358,7 @@ module Sequel
         when :includes
           generator_add_constraint_from_validation(generator, val, Sequel.&(*columns.map{|c| {c => arg}}))
           if arg.is_a?(Range)
-            if (b = arg.begin).is_a?(Integer) && (e = arg.end).is_a?(Integer)
+            if arg.begin.is_a?(Integer) && arg.end.is_a?(Integer)
               validation_type = :includes_int_range
               arg = "#{arg.begin}..#{'.' if arg.exclude_end?}#{arg.end}"
             else
@@ -401,16 +402,19 @@ module Sequel
       end
 
       ds = from(:sequel_constraint_validations)
-      ds.multi_insert(rows.flatten)
       unless drop_rows.empty?
         ds.where([:table, :constraint_name]=>drop_rows).delete
       end
+      ds.multi_insert(rows.flatten)
     end
 
     # Add the constraint to the generator, including a NOT NULL constraint
     # for all columns unless the :allow_nil option is given.
     def generator_add_constraint_from_validation(generator, val, cons)
-      unless val[:allow_nil]
+      if val[:allow_nil]
+        nil_cons = Sequel.expr(val[:columns].map{|c| [c, nil]})
+        cons = Sequel.|(nil_cons, cons) if cons
+      else
         nil_cons = Sequel.negate(val[:columns].map{|c| [c, nil]})
         cons = cons ? Sequel.&(nil_cons, cons) : nil_cons
       end

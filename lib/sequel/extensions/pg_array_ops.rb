@@ -19,8 +19,8 @@
 #
 #   ia = Sequel.expr(:int_array_column).pg_array
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_array:
 #
 #   ia = :int_array_column.pg_array
@@ -41,7 +41,10 @@
 #
 #   ia.any             # ANY(int_array_column)
 #   ia.all             # ALL(int_array_column)
+#   ia.cardinality     # cardinality(int_array_column)
 #   ia.dims            # array_dims(int_array_column)
+#   ia.hstore          # hstore(int_array_column)
+#   ia.hstore(:a)      # hstore(int_array_column, a)
 #   ia.length          # array_length(int_array_column, 1)
 #   ia.length(2)       # array_length(int_array_column, 2)
 #   ia.lower           # array_lower(int_array_column, 1)
@@ -50,6 +53,7 @@
 #   ia.join(':')       # array_to_string(int_array_column, ':', NULL)
 #   ia.join(':', ' ')  # array_to_string(int_array_column, ':', ' ')
 #   ia.unnest          # unnest(int_array_column)
+#   ia.unnest(:b)      # unnest(int_array_column, b)
 # 
 # See the PostgreSQL array function and operator documentation for more
 # details on what these functions and operators do.
@@ -57,6 +61,11 @@
 # If you are also using the pg_array extension, you should load it before
 # loading this extension.  Doing so will allow you to use PGArray#op to get
 # an ArrayOp, allowing you to perform array operations on array literals.
+#
+# In order for #hstore to automatically wrap the returned value correctly in
+# an HStoreOp, you need to load the pg_hstore_ops extension.
+
+#
 module Sequel
   module Postgres
     # The ArrayOp class is a simple container for a single object that
@@ -76,7 +85,9 @@ module Sequel
       #
       #   array_op[1] # array[1]
       def [](key)
-        Sequel::SQL::Subscript.new(self, [key])
+        s = Sequel::SQL::Subscript.new(self, [key])
+        s = ArrayOp.new(s) if key.is_a?(Range)
+        s
       end
 
       # Call the ALL function:
@@ -103,6 +114,13 @@ module Sequel
         function(:ANY)
       end
 
+      # Call the cardinality method:
+      #
+      #   array_op.cardinality # cardinality(array)
+      def cardinality
+        function(:cardinality)
+      end
+
       # Use the contains (@>) operator:
       #
       #   array_op.contains(:a) # (array @> a)
@@ -122,6 +140,23 @@ module Sequel
       #   array_op.dims # array_dims(array)
       def dims
         function(:array_dims)
+      end
+
+      # Convert the array into an hstore using the hstore function.
+      # If given an argument, use the two array form:
+      #
+      #   array_op.hstore          # hstore(array)
+      #   array_op.hstore(:array2) # hstore(array, array2)
+      def hstore(arg=(no_arg_given=true; nil))
+        v = if no_arg_given
+          Sequel.function(:hstore, self)
+        else
+          Sequel.function(:hstore, self, wrap_array(arg))
+        end
+        if Sequel.respond_to?(:hstore_op)
+          v = Sequel.hstore_op(v)
+        end
+        v
       end
 
       # Call the array_length method:
@@ -161,6 +196,21 @@ module Sequel
         self
       end
 
+      # Remove the given element from the array:
+      #
+      #   array_op.remove(1) # array_remove(array, 1)
+      def remove(element)
+        ArrayOp.new(function(:array_remove, element))
+      end
+
+      # Replace the given element in the array with another
+      # element:
+      #
+      #   array_op.replace(1, 2) # array_replace(array, 1, 2)
+      def replace(element, replacement)
+        ArrayOp.new(function(:array_replace, element, replacement))
+      end
+
       # Call the array_to_string method:
       #
       #   array_op.join           # array_to_string(array, '', NULL)
@@ -175,8 +225,8 @@ module Sequel
       # Call the unnest method:
       #
       #   array_op.unnest # unnest(array)
-      def unnest
-        function(:unnest)
+      def unnest(*args)
+        function(:unnest, *args.map{|a| wrap_array(a)})
       end
       
       # Use the concatentation (||) operator, reversing the order:

@@ -9,17 +9,13 @@
 #
 # To attempt to introspect columns for a single dataset:
 #
-#   ds.extension(:columns_introspection)
+#   ds = ds.extension(:columns_introspection)
 #
 # To attempt to introspect columns for all datasets on a single database:
 #
 #   DB.extension(:columns_introspection)
-#
-# To attempt to introspect columns for all datasets on all databases:
-#
-#   Sequel.extension :columns_introspection
-#   Sequel::Dataset.introspect_all_columns
 
+#
 module Sequel
   module ColumnsIntrospection
     # Attempt to guess the columns that will be returned
@@ -32,7 +28,7 @@ module Sequel
       if (pcs = probable_columns) && pcs.all?
         @columns = pcs
       else
-        columns_without_introspection
+        super
       end
     end
 
@@ -54,7 +50,7 @@ module Sequel
           from.probable_columns
         when Symbol, SQL::Identifier, SQL::QualifiedIdentifier
           schemas = db.instance_variable_get(:@schemas)
-          if schemas && (sch = Sequel.synchronize{schemas[literal(from)]})
+          if schemas && (table = literal(from)) && (sch = Sequel.synchronize{schemas[table]})
             sch.map{|c,_| c}
           end
         end
@@ -76,19 +72,9 @@ module Sequel
         col = c.column
         col.is_a?(SQL::Identifier) ? col.value.to_sym : col.to_sym
       when SQL::AliasedExpression
-        a = c.aliaz
+        a = c.alias
         a.is_a?(SQL::Identifier) ? a.value.to_sym : a.to_sym
       end
-    end
-  end
-
-  class Dataset
-    alias columns_without_introspection columns
-
-    # Enable column introspection for every dataset.
-    def self.introspect_all_columns
-      include ColumnsIntrospection
-      remove_method(:columns) if instance_methods(false).map{|x| x.to_s}.include?('columns')
     end
   end
 

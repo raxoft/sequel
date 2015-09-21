@@ -3,12 +3,12 @@ module Sequel
     # The sharding plugin augments Sequel's default model sharding support
     # in the following ways:
     #
-    # 1) It automatically sets model instances to be saved back to the
-    #    shard they were retreived from.
-    # 2) It makes model associations use the same shard as the model
-    #    object.
-    # 3) It adds a slightly nicer API for creating model instances on
-    #    specific shards.
+    # * It automatically sets model instances to be saved back to the
+    #   shard they were retreived from.
+    # * It makes model associations use the same shard as the model
+    #   object.
+    # * It adds a slightly nicer API for creating model instances on
+    #   specific shards.
     # 
     # Usage:
     #
@@ -24,15 +24,21 @@ module Sequel
           new_using_server(s, values, &block).save
         end
 
-        # When eagerly loading, if the current dataset has a defined shard and the
-        # dataset that you will be using to get the associated records does not,
-        # use the current dataset's shard for the associated dataset.
-        def eager_loading_dataset(opts, ds, select, associations, eager_options={})
-          ds = super(opts, ds, select, associations, eager_options)
-          if !ds.opts[:server] and s = eager_options[:self] and server = s.opts[:server]
-            ds = ds.server(server)
+        # Eager load the association with the given eager loader options.
+        def eager_load_results(opts, eo, &block)
+          if (s = eo[:self]) && (server = s.opts[:server])
+            eb = eo[:eager_block]
+            set_server = proc do |ds|
+              ds = eb.call(ds) if eb
+              ds = ds.server?(server)
+              ds
+            end
+            eo = Hash[eo]
+            eo[:eager_block] = set_server
+            eo
           end
-          ds
+
+          super
         end
 
         # Return a newly instantiated object that is tied to the given
@@ -49,7 +55,7 @@ module Sequel
         def eager_graph_dataset(opts, eager_options)
           ds = super
           if s = eager_options[:self].opts[:server]
-            ds = ds.server(s) unless ds.opts[:server]
+            ds = ds.server?(s)
           end
           ds
         end
@@ -70,6 +76,11 @@ module Sequel
           use_server(super)
         end
 
+        # Don't use an associated object loader, as it won't respect the shard used.
+        def _associated_object_loader(opts, dynamic_opts)
+          nil
+        end
+
         # Ensure that the join table for many_to_many associations uses the correct shard.
         def _join_table_dataset(opts)
           use_server(super)
@@ -81,6 +92,12 @@ module Sequel
         def ensure_associated_primary_key(opts, o, *args)
           o.set_server?(@server) if o.respond_to?(:set_server?)
           super
+        end
+
+        # Don't use primary key lookup to load associated objects, since that will not
+        # respect the current object's server.
+        def load_with_primary_key_lookup?(opts, dynamic_opts)
+          false
         end
       end
 

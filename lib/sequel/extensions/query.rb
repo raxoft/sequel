@@ -1,20 +1,39 @@
-# The query extension adds Sequel::Dataset#query which allows
+# The query extension adds a query method which allows
 # a different way to construct queries instead of the usual
-# method chaining.  See Sequel::Dataset#query for details.
+# method chaining:
 #
-# To load the extension, do:
+#   dataset = DB[:items].query do
+#     select :x, :y, :z
+#     filter{(x > 1) & (y > 2)}
+#     reverse :z
+#   end
 #
-#   Sequel.extension :query
+# You can load this extension into specific datasets:
+#
+#   ds = DB[:table]
+#   ds = ds.extension(:query)
+#
+# Or you can load it into all of a database's datasets, which
+# is probably the desired behavior if you are using this extension:
+#
+#   DB.extension(:query)
 
+#
 module Sequel
-  class Database
+  module DatabaseQuery
+    def self.extended(db)
+      db.extend_datasets(DatasetQuery)
+    end
+
     # Return a dataset modified by the query block
     def query(&block)
       dataset.query(&block)
     end
   end
 
-  class Dataset
+  module DatasetQuery
+    Dataset.def_mutation_method(:query, :module=>self)
+
     # Translates a query block into a dataset. Query blocks are an
     # alternative to Sequel's usual method chaining, by using
     # instance_eval with a proxy object:
@@ -29,11 +48,13 @@ module Sequel
     #
     #  dataset = DB[:items].select(:x, :y, :z).filter{(x > 1) & (y > 2)}.reverse(:z)
     def query(&block)
-      query = Query.new(self)
+      query = Dataset::Query.new(self)
       query.instance_eval(&block)
       query.dataset
     end
+  end
 
+  class Dataset
     # Proxy object used by Dataset#query.
     class Query < Sequel::BasicObject
       # The current dataset in the query.  This changes on each method call.
@@ -51,4 +72,7 @@ module Sequel
       end
     end
   end
+
+  Dataset.register_extension(:query, DatasetQuery)
+  Database.register_extension(:query, DatabaseQuery)
 end

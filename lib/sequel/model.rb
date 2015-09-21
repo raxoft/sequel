@@ -35,7 +35,7 @@ module Sequel
   #     dataset # => DB1[:comments]
   #   end
   def self.Model(source)
-    if Sequel::Model.cache_anonymous_models && (klass = Sequel.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source]})
+    if cache_anonymous_models && (klass = Model::ANONYMOUS_MODEL_CLASSES_MUTEX.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source]})
       return klass
     end
     klass = if source.is_a?(Database)
@@ -45,8 +45,17 @@ module Sequel
     else
       Class.new(Model).set_dataset(source)
     end
-    Sequel.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source] = klass} if Sequel::Model.cache_anonymous_models
+    Model::ANONYMOUS_MODEL_CLASSES_MUTEX.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source] = klass} if cache_anonymous_models
     klass
+  end
+
+  @cache_anonymous_models = true
+
+  class << self
+    # Whether to cache the anonymous models created by Sequel::Model().  This is
+    # required for reloading them correctly (avoiding the superclass mismatch).  True
+    # by default for backwards compatibility.
+    attr_accessor :cache_anonymous_models
   end
 
   # <tt>Sequel::Model</tt> is an object relational mapper built on top of Sequel core.  Each
@@ -63,20 +72,19 @@ module Sequel
   # You can set the +SEQUEL_NO_ASSOCIATIONS+ constant or environment variable to
   # make Sequel not load the associations plugin by default.
   class Model
-    # Cache anonymous models created by Sequel::Model()
-    @cache_anonymous_models = true
+    OPTS = Sequel::OPTS
 
     # Map that stores model classes created with <tt>Sequel::Model()</tt>, to allow the reopening
     # of classes when dealing with code reloading.
     ANONYMOUS_MODEL_CLASSES = {}
 
+    # Mutex protecting access to ANONYMOUS_MODEL_CLASSES
+    ANONYMOUS_MODEL_CLASSES_MUTEX = Mutex.new
+
     # Class methods added to model that call the method of the same name on the dataset
     DATASET_METHODS = (Dataset::ACTION_METHODS + Dataset::QUERY_METHODS +
-      [:eager, :eager_graph, :each_page, :each_server, :print]) - [:and, :or, :[], :[]=, :columns, :columns!]
+      [:each_server]) - [:and, :or, :[], :columns, :columns!, :delete, :update, :add_graph_aliases, :first, :first!]
     
-    # Class instance variables to set to nil when a subclass is created, for -w compliance
-    EMPTY_INSTANCE_VARIABLES = [:@overridable_methods_module, :@db]
-
     # Boolean settings that can be modified at the global, class, or instance level.
     BOOLEAN_SETTINGS = [:typecast_empty_string_to_nil, :typecast_on_assignment, :strict_param_setting, \
       :raise_on_save_failure, :raise_on_typecast_failure, :require_modification, :use_after_commit_rollback, :use_transactions]
@@ -88,7 +96,7 @@ module Sequel
 
     # Hooks that are called after an action.  When overriding these, it is recommended to call
     # +super+ on the first line of your method, so later hooks are called after earlier hooks.
-    AFTER_HOOKS = [:after_initialize, :after_create, :after_update, :after_save, :after_destroy,
+    AFTER_HOOKS = [:after_create, :after_update, :after_save, :after_destroy,
       :after_validation, :after_commit, :after_rollback, :after_destroy_commit, :after_destroy_rollback]
 
     # Hooks that are called around an action.  If overridden, these methods must call super
@@ -99,7 +107,7 @@ module Sequel
     # Empty instance methods to create that the user can override to get hook/callback behavior.
     # Just like any other method defined by Sequel, if you override one of these, you should
     # call +super+ to get the default behavior (while empty by default, they can also be defined
-    # by plugins).  See the {"Model Hooks" guide}[link:files/doc/model_hooks_rdoc.html] for
+    # by plugins).  See the {"Model Hooks" guide}[rdoc-ref:doc/model_hooks.rdoc] for
     # more detail on hooks.
     HOOKS = BEFORE_HOOKS + AFTER_HOOKS
 
@@ -114,7 +122,8 @@ module Sequel
       :@typecast_empty_string_to_nil=>nil, :@typecast_on_assignment=>nil,
       :@raise_on_typecast_failure=>nil, :@plugins=>:dup, :@setter_methods=>nil,
       :@use_after_commit_rollback=>nil, :@fast_pk_lookup_sql=>nil,
-      :@fast_instance_delete_sql=>nil}
+      :@fast_instance_delete_sql=>nil, :@finders=>:dup, :@finder_loaders=>:dup,
+      :@db=>nil, :@default_set_fields_options=>:dup}
 
     # Regular expression that determines if a method name is normal in the sense that
     # it could be used literally in ruby code without using send.  Used to
@@ -128,12 +137,19 @@ module Sequel
     @allowed_columns = nil
     @db = nil
     @db_schema = nil
+    @dataset = nil
     @dataset_method_modules = []
+    @default_eager_limit_strategy = true
+    @default_set_fields_options = {}
+    @finders = {}
+    @finder_loaders = {}
     @overridable_methods_module = nil
+    @fast_pk_lookup_sql = nil
+    @fast_instance_delete_sql = nil
     @plugins = []
     @primary_key = :id
     @raise_on_save_failure = true
-    @raise_on_typecast_failure = true
+    @raise_on_typecast_failure = false
     @require_modification = nil
     @restrict_primary_key = true
     @restricted_columns = nil
@@ -154,6 +170,6 @@ module Sequel
 
     # The setter methods (methods ending with =) that are never allowed
     # to be called automatically via +set+/+update+/+new+/etc..
-    RESTRICTED_SETTER_METHODS = instance_methods.map{|x| x.to_s}.grep(SETTER_METHOD_REGEXP)
+    RESTRICTED_SETTER_METHODS = instance_methods.map(&:to_s).grep(SETTER_METHOD_REGEXP)
   end
 end

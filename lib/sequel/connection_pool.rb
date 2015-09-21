@@ -13,14 +13,18 @@
 #            connection pool recognizes.
 # size :: an integer representing the total number of connections in the pool,
 #         or for the given shard/server if sharding is supported.
+# max_size :: an integer representing the maximum size of the connection pool,
+#             or the maximum size per shard/server if sharding is supported.
 #
 # For sharded connection pools, the sharded API adds the following methods:
 #
 # add_servers(Array of Symbols) :: start recognizing all shards/servers specified
 #                                  by the array of symbols.
-# * remove_servers(Array of Symbols) :: no longer recognize all shards/servers
-#                                       specified by the array of symbols.
+# remove_servers(Array of Symbols) :: no longer recognize all shards/servers
+#                                     specified by the array of symbols.
 class Sequel::ConnectionPool
+  OPTS = Sequel::OPTS
+
   # The default server to use
   DEFAULT_SERVER = :default
   
@@ -37,12 +41,12 @@ class Sequel::ConnectionPool
     # option is provided is provided, use that pool class, otherwise
     # use a new instance of an appropriate pool subclass based on the
     # <tt>:single_threaded</tt> and <tt>:servers</tt> options.
-    def get_pool(db, opts = {})
+    def get_pool(db, opts = OPTS)
       case v = connection_pool_class(opts)
       when Class
         v.new(db, opts)
       when Symbol
-        Sequel.ts_require("connection_pool/#{v}")
+        require("sequel/connection_pool/#{v}")
         connection_pool_class(opts).new(db, opts) || raise(Sequel::Error, "No connection pool class found")
       end
     end
@@ -67,10 +71,13 @@ class Sequel::ConnectionPool
   # with a single symbol (specifying the server/shard to use) every time a new
   # connection is needed.  The following options are respected for all connection
   # pools:
-  # :after_connect :: The proc called after each new connection is made, with the
-  #                   connection object, useful for customizations that you want to apply to all
-  #                   connections.
-  def initialize(db, opts={})
+  # :after_connect :: A callable object called after each new connection is made, with the
+  #                   connection object (and server argument if the callable accepts 2 arguments),
+  #                   useful for customizations that you want to apply to all connections.
+  # :preconnect :: Automatically create the maximum number of connections, so that they don't
+  #                need to be created as needed.  This is useful when connecting takes a long time
+  #                and you want to avoid possible latency during runtime.
+  def initialize(db, opts=OPTS)
     @db = db
     @after_connect = opts[:after_connect]
   end
@@ -92,7 +99,13 @@ class Sequel::ConnectionPool
   def make_new(server)
     begin
       conn = @db.connect(server)
-      @after_connect.call(conn) if @after_connect
+      if ac = @after_connect
+        if ac.arity == 2
+          ac.call(conn, server)
+        else
+          ac.call(conn)
+        end
+      end
     rescue Exception=>exception
       raise Sequel.convert_exception_class(exception, Sequel::DatabaseConnectionError)
     end

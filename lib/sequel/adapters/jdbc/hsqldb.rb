@@ -1,11 +1,21 @@
+Sequel::JDBC.load_driver('org.hsqldb.jdbcDriver', :HSQLDB)
 Sequel.require 'adapters/jdbc/transactions'
 
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:hsqldb] = proc do |db|
+        db.extend(Sequel::JDBC::HSQLDB::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::HSQLDB::Dataset
+        org.hsqldb.jdbcDriver
+      end
+    end
+
     # Database and Dataset support for HSQLDB databases accessed via JDBC.
     module HSQLDB
       # Instance methods for HSQLDB Database objects accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         PRIMARY_KEY_INDEX_RE = /\Asys_idx_sys_pk_/i.freeze
 
         include ::Sequel::JDBC::Transactions
@@ -31,11 +41,23 @@ module Sequel
           end
         end
         
+        # HSQLDB supports DROP TABLE IF EXISTS
+        def supports_drop_table_if_exists?
+          true
+        end
+
         private
         
         # HSQLDB specific SQL for renaming columns, and changing column types and/or nullity.
         def alter_table_sql(table, op)
           case op[:op]
+          when :add_column
+            if op[:table]
+              [super(table, op.merge(:table=>nil)),
+               alter_table_sql(table, op.merge(:op=>:add_constraint, :type=>:foreign_key, :name=>op[:foreign_key_name], :columns=>[op[:name]], :table=>op[:table]))]
+            else
+              super
+            end
           when :rename_column
             "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(op[:name])} RENAME TO #{quote_identifier(op[:new_name])}"
           when :set_column_type
@@ -63,13 +85,23 @@ module Sequel
           DATABASE_ERROR_REGEXPS
         end
 
+        # IF EXISTS comes after table name on HSQLDB
+        def drop_table_sql(name, options)
+          "DROP TABLE #{quote_schema_table(name)}#{' IF EXISTS' if options[:if_exists]}#{' CASCADE' if options[:cascade]}"
+        end
+        
+        # IF EXISTS comes after view name on HSQLDB
+        def drop_view_sql(name, options)
+          "DROP VIEW #{quote_schema_table(name)}#{' IF EXISTS' if options[:if_exists]}#{' CASCADE' if options[:cascade]}"
+        end
+
         # Use IDENTITY() to get the last inserted id.
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           statement(conn) do |stmt|
             sql = 'CALL IDENTITY()'
             rs = log_yield(sql){stmt.executeQuery(sql)}
             rs.next
-            rs.getInt(1)
+            rs.getLong(1)
           end
         end
         
@@ -99,25 +131,21 @@ module Sequel
         def uses_clob_for_text?
           true
         end
+
+        # HSQLDB supports views with check option.
+        def view_with_check_option_support
+          :local
+        end
       end
       
       # Dataset class for HSQLDB datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        BITWISE_METHOD_MAP = {:& =>:BITAND, :| => :BITOR, :^ => :BITXOR}
         BOOL_TRUE = 'TRUE'.freeze
         BOOL_FALSE = 'FALSE'.freeze
-        # HSQLDB does support common table expressions, but the support is broken.
-        # CTEs operate more like temprorary tables or views, lasting longer than the duration of the expression.
-        # CTEs in earlier queries might take precedence over CTEs with the same name in later queries.
-        # Also, if any CTE is recursive, all CTEs must be recursive.
-        # If you want to use CTEs with HSQLDB, you'll have to manually modify the dataset to allow it.
-        SELECT_CLAUSE_METHODS = clause_methods(:select, %w'select distinct columns from join where group having compounds order limit lock')
         SQL_WITH_RECURSIVE = "WITH RECURSIVE ".freeze
         APOS = Dataset::APOS
         HSTAR = "H*".freeze
         BLOB_OPEN = "X'".freeze
-        BITCOMP_OPEN = "((0 - ".freeze
-        BITCOMP_CLOSE = ") - 1)".freeze
         DEFAULT_FROM = " FROM (VALUES (0))".freeze
         TIME_FORMAT = "'%H:%M:%S'".freeze
 
@@ -126,19 +154,8 @@ module Sequel
           case op
           when :ILIKE, :"NOT ILIKE"
             super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), args.map{|v| SQL::Function.new(:ucase, v)})
-          when :&, :|, :^
-            op = BITWISE_METHOD_MAP[op]
-            sql << complex_expression_arg_pairs(args){|a, b| literal(SQL::Function.new(op, a, b))}
-          when :<<
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} * POWER(2, #{literal(b)}))"}
-          when :>>
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} / POWER(2, #{literal(b)}))"}
-          when :%
-            sql << complex_expression_arg_pairs(args){|a, b| "MOD(#{literal(a)}, #{literal(b)})"}
-          when :'B~'
-            sql << BITCOMP_OPEN
-            literal_append(sql, args.at(0))
-            sql << BITCOMP_CLOSE
+          when :&, :|, :^, :%, :<<, :>>, :'B~'
+            complex_expression_emulate_append(sql, op, args)
           else
             super
           end
@@ -154,13 +171,31 @@ module Sequel
           true
         end
 
+        # HSQLDB does support common table expressions, but the support is broken.
+        # CTEs operate more like temprorary tables or views, lasting longer than the duration of the expression.
+        # CTEs in earlier queries might take precedence over CTEs with the same name in later queries.
+        # Also, if any CTE is recursive, all CTEs must be recursive.
+        # If you want to use CTEs with HSQLDB, you'll have to manually modify the dataset to allow it.
+        def supports_cte?(type=:select)
+          false
+        end
+
         # HSQLDB does not support IS TRUE.
         def supports_is_true?
           false
         end
 
+        # HSQLDB supports lateral subqueries.
+        def supports_lateral_subqueries?
+          true
+        end
+
         private
 
+        def empty_from_sql
+          DEFAULT_FROM
+        end
+        
         # Use string in hex format for blob data.
         def literal_blob_append(sql, v)
           sql << BLOB_OPEN << v.unpack(HSTAR).first << APOS
@@ -181,20 +216,11 @@ module Sequel
           BOOL_TRUE
         end
 
-        # HSQLDB does not support CTEs well enough for Sequel to enable support for them.
-        def select_clause_methods
-          SELECT_CLAUSE_METHODS
+        # HSQLDB supports multiple rows in INSERT.
+        def multi_insert_sql_strategy
+          :values
         end
 
-        # Use a default FROM table if the dataset does not contain a FROM table.
-        def select_from_sql(sql)
-          if @opts[:from]
-            super
-          else
-            sql << DEFAULT_FROM
-          end
-        end
-        
         # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
         def select_with_sql_base
           opts[:with].any?{|w| w[:recursive]} ? SQL_WITH_RECURSIVE : super

@@ -1,12 +1,22 @@
+Sequel::JDBC.load_driver('com.mysql.jdbc.Driver', :MySQL)
 Sequel.require 'adapters/shared/mysql'
 
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:mysql] = proc do |db|
+        db.extend(Sequel::JDBC::MySQL::DatabaseMethods)
+        db.extend_datasets Sequel::MySQL::DatasetMethods
+        com.mysql.jdbc.Driver
+      end
+    end
+
     # Database and Dataset instance methods for MySQL specific
     # support via JDBC.
     module MySQL
       # Database instance methods for MySQL databases accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::MySQL::DatabaseMethods
         LAST_INSERT_ID = 'SELECT LAST_INSERT_ID()'.freeze
         
@@ -25,13 +35,18 @@ module Sequel
           false
         end
 
+        # Raise a disconnect error if the SQL state of the cause of the exception indicates so.
+        def disconnect_error?(exception, opts)
+          exception.message =~ /\ACommunications link failure/ || super
+        end
+
         # Get the last inserted id using LAST_INSERT_ID().
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           if stmt = opts[:stmt]
             rs = stmt.getGeneratedKeys
             begin
               if rs.next
-                rs.getInt(1)
+                rs.getLong(1)
               else
                 0
               end
@@ -39,10 +54,10 @@ module Sequel
               rs.close
             end
           else
-            statement(conn) do |stmt|
-              rs = stmt.executeQuery(LAST_INSERT_ID)
+            statement(conn) do |st|
+              rs = st.executeQuery(LAST_INSERT_ID)
               rs.next
-              rs.getInt(1)
+              rs.getLong(1)
             end
           end
         end

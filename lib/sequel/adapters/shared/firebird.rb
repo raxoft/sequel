@@ -1,6 +1,8 @@
 module Sequel
   module Firebird
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       AUTO_INCREMENT = ''.freeze
       TEMPORARY = 'GLOBAL TEMPORARY '.freeze
 
@@ -33,16 +35,16 @@ module Sequel
         self << restart_sequence_sql(*args)
       end
 
-      def sequences(opts={})
+      def sequences(opts=OPTS)
         ds = self[:"rdb$generators"].server(opts[:server]).filter(:"rdb$system_flag" => 0).select(:"rdb$generator_name")
         block_given? ? yield(ds) : ds.map{|r| ds.send(:output_identifier, r[:"rdb$generator_name"])}
       end
 
-      def tables(opts={})
+      def tables(opts=OPTS)
         tables_or_views(0, opts)
       end
 
-      def views(opts={})
+      def views(opts=OPTS)
         tables_or_views(1, opts)
       end
 
@@ -68,7 +70,7 @@ module Sequel
         AUTO_INCREMENT
       end
       
-      def create_sequence_sql(name, opts={})
+      def create_sequence_sql(name, opts=OPTS)
         "CREATE SEQUENCE #{quote_identifier(name)}"
       end
 
@@ -80,7 +82,7 @@ module Sequel
         create_statements.each{|sql| execute_ddl(sql)}
       end
 
-      def create_table_sql_list(name, generator, options={})
+      def create_table_sql_list(name, generator, options=OPTS)
         statements = [create_table_sql(name, generator, options)]
         drop_seq_statement = nil
         generator.columns.each do |c|
@@ -109,7 +111,7 @@ module Sequel
         [drop_seq_statement, statements]
       end
 
-      def create_trigger_sql(table, name, definition, opts={})
+      def create_trigger_sql(table, name, definition, opts=OPTS)
         events = opts[:events] ? Array(opts[:events]) : [:insert, :update, :delete]
         whence = opts[:after] ? 'AFTER' : 'BEFORE'
         inactive = opts[:inactive] ? 'INACTIVE' : 'ACTIVE'
@@ -131,7 +133,7 @@ module Sequel
         super
       end
 
-      def restart_sequence_sql(name, opts={})
+      def restart_sequence_sql(name, opts=OPTS)
         seq_name = quote_identifier(name)
         "ALTER SEQUENCE #{seq_name} RESTART WITH #{opts[:restart_position]}"
       end
@@ -144,18 +146,24 @@ module Sequel
       def type_literal_generic_string(column)
         column[:text] ? :"BLOB SUB_TYPE TEXT" : super
       end
+
+      # Firebird supports views with check option, but not local.
+      def view_with_check_option_support
+        true
+      end
     end
 
     module DatasetMethods
       BOOL_TRUE = '1'.freeze
       BOOL_FALSE = '0'.freeze
       NULL = LiteralString.new('NULL').freeze
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'with select distinct limit columns from join where group having compounds order')
-      INSERT_CLAUSE_METHODS = Dataset.clause_methods(:insert, %w'insert into columns values returning')
       FIRST = " FIRST ".freeze
       SKIP = " SKIP ".freeze
       DEFAULT_FROM = " FROM RDB$DATABASE"
       
+      Dataset.def_sql_method(self, :select, %w'with select distinct limit columns from join where group having compounds order')
+      Dataset.def_sql_method(self, :insert, %w'insert into columns values returning')
+
       # Insert given values into the database.
       def insert(*values)
         if @opts[:sql] || @opts[:returning]
@@ -167,11 +175,22 @@ module Sequel
 
       # Insert a record returning the record inserted
       def insert_select(*values)
-        returning.insert(*values){|r| return r}
+        with_sql_first(insert_select_sql(*values))
+      end
+
+      # The SQL to use for an insert_select, adds a RETURNING clause to the insert
+      # unless the RETURNING clause is already present.
+      def insert_select_sql(*values)
+        ds = opts[:returning] ? self : returning
+        ds.insert_sql(*values)
       end
 
       def requires_sql_standard_datetimes?
         true
+      end
+
+      def supports_cte?(type=:select)
+        type == :select
       end
 
       def supports_insert_select?
@@ -183,10 +202,14 @@ module Sequel
         false
       end
 
+      def supports_returning?(type)
+        type == :insert
+      end
+
       private
 
-      def insert_clause_methods
-        INSERT_CLAUSE_METHODS
+      def empty_from_sql
+        DEFAULT_FROM
       end
 
       def insert_pk(*values)
@@ -202,19 +225,10 @@ module Sequel
         BOOL_TRUE
       end
 
-      # The order of clauses in the SELECT SQL statement
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
+      # Firebird can insert multiple rows using a UNION
+      def multi_insert_sql_strategy
+        :union
       end
-      
-        # Use a default FROM table if the dataset does not contain a FROM table.
-        def select_from_sql(sql)
-          if @opts[:from]
-            super
-          else
-            sql << DEFAULT_FROM
-          end
-        end
 
       def select_limit_sql(sql)
         if l = @opts[:limit]

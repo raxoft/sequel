@@ -14,35 +14,25 @@ module Sequel
       # Whether to convert tinyint columns to bool for this database
       attr_accessor :convert_tinyint_to_bool
 
-      # Set the convert_tinyint_to_bool setting based on the default value.
-      def initialize(opts={})
-        super
-        self.convert_tinyint_to_bool = Sequel::MySQL.convert_tinyint_to_bool
-      end
-
       # Connect to the database.  In addition to the usual database options,
       # the following options have effect:
       #
-      # * :auto_is_null - Set to true to use MySQL default behavior of having
-      #   a filter for an autoincrement column equals NULL to return the last
-      #   inserted row.
-      # * :charset - Same as :encoding (:encoding takes precendence)
-      # * :config_default_group - The default group to read from the in
-      #   the MySQL config file.
-      # * :config_local_infile - If provided, sets the Mysql::OPT_LOCAL_INFILE
-      #   option on the connection with the given value.
-      # * :connect_timeout - Set the timeout in seconds before a connection
-      #   attempt is abandoned.
-      # * :encoding - Set all the related character sets for this
-      #   connection (connection, client, database, server, and results).
-      # * :socket - Use a unix socket file instead of connecting via TCP/IP.
-      # * :timeout - Set the timeout in seconds before the server will
-      #   disconnect this connection (a.k.a. @@wait_timeout).
+      # :auto_is_null :: Set to true to use MySQL default behavior of having
+      #                  a filter for an autoincrement column equals NULL to return the last
+      #                  inserted row.
+      # :charset :: Same as :encoding (:encoding takes precendence)
+      # :encoding :: Set all the related character sets for this
+      #              connection (connection, client, database, server, and results).
+      #
+      # The options hash is also passed to mysql2, and can include mysql2
+      # options such as :local_infile.
       def connect(server)
         opts = server_opts(server)
         opts[:host] ||= 'localhost'
         opts[:username] ||= opts.delete(:user)
-        opts[:flags] = ::Mysql2::Client::FOUND_ROWS if ::Mysql2::Client.const_defined?(:FOUND_ROWS)
+        opts[:flags] ||= 0
+        opts[:flags] |= ::Mysql2::Client::FOUND_ROWS if ::Mysql2::Client.const_defined?(:FOUND_ROWS)
+        opts[:encoding] ||= opts[:charset]
         conn = ::Mysql2::Client.new(opts)
         conn.query_options.merge!(:symbolize_keys=>true, :cache_rows=>false)
 
@@ -52,7 +42,7 @@ module Sequel
         # in case the READ_DEFAULT_GROUP overrode the provided encoding.
         # Doesn't work across implicit reconnects, but Sequel doesn't turn on
         # that feature.
-        if encoding = opts[:encoding] || opts[:charset]
+        if encoding = opts[:encoding]
           sqls.unshift("SET NAMES #{conn.escape(encoding.to_s)}")
         end
 
@@ -63,16 +53,16 @@ module Sequel
       end
 
       # Return the number of matched rows when executing a delete/update statement.
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         execute(sql, opts){|c| return c.affected_rows}
       end
 
       # Return the last inserted id when executing an insert statement.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         execute(sql, opts){|c| return c.last_id}
       end
 
-      # Return the version of the MySQL server two which we are connecting.
+      # Return the version of the MySQL server to which we are connecting.
       def server_version(server=nil)
         @server_version ||= (synchronize(server){|conn| conn.server_info[:id]} || super)
       end
@@ -84,15 +74,34 @@ module Sequel
       # yield the connection if a block is given.
       def _execute(conn, sql, opts)
         begin
-          r = log_yield((log_sql = opts[:log_sql]) ? sql + log_sql : sql){conn.query(sql, :database_timezone => timezone, :application_timezone => Sequel.application_timezone)}
+          stream = opts[:stream]
+          r = log_yield((log_sql = opts[:log_sql]) ? sql + log_sql : sql){conn.query(sql, :database_timezone => timezone, :application_timezone => Sequel.application_timezone, :stream=>stream)}
           if opts[:type] == :select
-            yield r if r
+            if r
+              if stream
+                begin
+                  r2 = yield r
+                ensure
+                  # If r2 is nil, it means the block did not exit normally,
+                  # so the rest of the results must be drained to prevent
+                  # "commands out of sync" errors.
+                  r.each{} unless r2
+                end
+              else
+                yield r
+              end
+            end
           elsif block_given?
             yield conn
           end
         rescue ::Mysql2::Error => e
           raise_error(e)
         end
+      end
+
+      # Set the convert_tinyint_to_bool setting based on the default value.
+      def adapter_initialize
+        self.convert_tinyint_to_bool = Sequel::MySQL.convert_tinyint_to_bool
       end
 
       # MySQL connections use the query method to execute SQL without a result
@@ -136,6 +145,7 @@ module Sequel
     class Dataset < Sequel::Dataset
       include Sequel::MySQL::DatasetMethods
       include Sequel::MySQL::PreparedStatements::DatasetMethods
+      STREAMING_SUPPORTED = ::Mysql2::VERSION >= '0.3.12'
 
       Database::DatasetClass = self
 
@@ -152,6 +162,22 @@ module Sequel
         self
       end
 
+      # Use streaming to implement paging if Mysql2 supports it.
+      def paged_each(opts=OPTS, &block)
+        if STREAMING_SUPPORTED
+          stream.each(&block)
+        else
+          super
+        end
+      end
+
+      # Return a clone of the dataset that will stream rows when iterating
+      # over the result set, so it can handle large datasets that
+      # won't fit in memory (Requires mysql 0.3.12+ to have an effect).
+      def stream
+        clone(:stream=>true)
+      end
+
       private
 
       # Whether to cast tinyint(1) columns to integer instead of boolean.
@@ -162,13 +188,16 @@ module Sequel
       end
 
       # Set the :type option to :select if it hasn't been set.
-      def execute(sql, opts={}, &block)
-        super(sql, {:type=>:select}.merge(opts), &block)
+      def execute(sql, opts=OPTS)
+        opts = Hash[opts]
+        opts[:type] = :select
+        opts[:stream] = @opts[:stream]
+        super
       end
 
       # Handle correct quoting of strings using ::Mysql2::Client#escape.
       def literal_string_append(sql, v)
-        sql << "'" << db.synchronize{|c| c.escape(v)} << "'"
+        sql << APOS << db.synchronize(@opts[:server]){|c| c.escape(v)} << APOS
       end
     end
   end

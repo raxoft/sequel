@@ -9,14 +9,21 @@
 #   |2 |test   |
 #   +--+-------+
 #
-# To load the extension:
+# You can load this extension into specific datasets:
 #
-#   Sequel.extension :pretty_table
+#   ds = DB[:table]
+#   ds = ds.extension(:pretty_table)
+#
+# Or you can load it into all of a database's datasets, which
+# is probably the desired behavior if you are using this extension:
+#
+#   DB.extension(:pretty_table)
 
+#
 module Sequel
   extension :_pretty_table
 
-  class Dataset
+  module DatasetPrinter
     # Pretty prints the records in the dataset as plain-text table.
     def print(*cols)
       ds = naked
@@ -24,4 +31,6 @@ module Sequel
       Sequel::PrettyTable.print(rows, cols.empty? ? ds.columns : cols)
     end
   end
+
+  Dataset.register_extension(:pretty_table, DatasetPrinter)
 end

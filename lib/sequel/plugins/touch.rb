@@ -30,18 +30,21 @@ module Sequel
       # The default column to update when touching
       TOUCH_COLUMN_DEFAULT = :updated_at
 
+      def self.apply(model, opts=OPTS)
+        model.instance_variable_set(:@touched_associations, {})
+      end
+
       # Set the touch_column and touched_associations variables for the model.
       # Options:
-      # * :associations - The associations to touch when a model instance is
-      #   updated or destroyed.  Can be a symbol for a single association,
-      #   a hash with association keys and column values, or an array of
-      #   symbols and/or hashes.  If a symbol is used, the column used
-      #   when updating the associated objects is the model's touch_column.
-      #   If a hash is used, the value is used as the column to update.
-      # * :column - The column to modify when touching a model instance.
-      def self.configure(model, opts={})
+      # :associations :: The associations to touch when a model instance is
+      #                  updated or destroyed.  Can be a symbol for a single association,
+      #                  a hash with association keys and column values, or an array of
+      #                  symbols and/or hashes.  If a symbol is used, the column used
+      #                  when updating the associated objects is the model's touch_column.
+      #                  If a hash is used, the value is used as the column to update.
+      # :column :: The column to modify when touching a model instance.
+      def self.configure(model, opts=OPTS)
         model.touch_column = opts[:column] || TOUCH_COLUMN_DEFAULT if opts[:column] || !model.touch_column
-        model.instance_variable_set(:@touched_associations, {})
         model.touch_associations(opts[:associations]) if opts[:associations]
       end
 
@@ -56,13 +59,7 @@ module Sequel
         # are column name symbols.
         attr_reader :touched_associations
 
-        # Set the touch_column for the subclass to be the same as the current class.
-        # Also, create a copy of the touched_associations in the subclass.
-        def inherited(subclass)
-          super
-          subclass.touch_column = touch_column
-          subclass.instance_variable_set(:@touched_associations, touched_associations.dup)
-        end
+        Plugins.inherited_instance_variables(self, :@touched_associations=>:dup, :@touch_column=>nil)
 
         # Add additional associations to be touched.  See the :association option
         # of the Sequel::Plugin::Touch.configure method for the format of the associations
@@ -133,9 +130,9 @@ module Sequel
         end
 
         # The value to use when modifying the touch column for the model instance.
-        # Uses Time.now to work well with typecasting.
+        # Uses Time/DateTime.now to work well with typecasting.
         def touch_instance_value
-          Time.now
+          model.dataset.current_datetime
         end
       end
     end

@@ -7,15 +7,26 @@ end
 
 unless Object.const_defined?('Sequel')
   $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
-  SEQUEL_NO_CORE_EXTENSIONS = true
   require 'sequel/core'
 end
+Sequel::Deprecation.backtrace_filter = lambda{|line, lineno| lineno < 4 || line =~ /_spec\.rb/}
 
-Sequel.extension :meta_def
+gem 'minitest'
+require 'minitest/autorun'
+require 'minitest/hooks/default'
+require 'minitest/shared_description'
+
+class Minitest::HooksSpec
+  def meta_def(obj, name, &block)
+    (class << obj; self end).send(:define_method, name, &block)
+  end
+end
 
 if ENV['SEQUEL_COLUMNS_INTROSPECTION']
   Sequel.extension :columns_introspection
-  Sequel::Dataset.introspect_all_columns
+  Sequel::Database.extension :columns_introspection
+  Sequel.require 'adapters/mock'
+  Sequel::Mock::Dataset.send(:include, Sequel::ColumnsIntrospection)
 end
 
 Sequel.quote_identifiers = false

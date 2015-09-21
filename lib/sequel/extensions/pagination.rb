@@ -1,15 +1,34 @@
 # The pagination extension adds the Sequel::Dataset#paginate and #each_page methods,
-# which return paginated (limited and offset) datasets with some helpful methods
-# that make creating a paginated display easier.
+# which return paginated (limited and offset) datasets with the following methods
+# added that make creating a paginated display easier:
 #
-# To load the extension:
-#
-#   Sequel.extension :pagination
+# * +page_size+
+# * +page_count+
+# * +page_range+
+# * +current_page+
+# * +next_page+
+# * +prev_page+
+# * +first_page?+
+# * +last_page?+
+# * +pagination_record_count+
+# * +current_page_record_count+
+# * +current_page_record_range+
 #
 # This extension uses Object#extend at runtime, which can hurt performance.
+#
+# You can load this extension into specific datasets:
+#
+#   ds = DB[:table]
+#   ds = ds.extension(:pagination)
+#
+# Or you can load it into all of a database's datasets, which
+# is probably the desired behavior if you are using this extension:
+#
+#   DB.extension(:pagination)
 
+#
 module Sequel
-  class Dataset
+  module DatasetPagination
     # Returns a paginated dataset. The returned dataset is limited to
     # the page size at the correct offset, and extended with the Pagination
     # module.  If a record count is not provided, does a count of total
@@ -17,20 +36,24 @@ module Sequel
     def paginate(page_no, page_size, record_count=nil)
       raise(Error, "You cannot paginate a dataset that already has a limit") if @opts[:limit]
       paginated = limit(page_size, (page_no - 1) * page_size)
-      paginated.extend(Pagination)
+      paginated.extend(Dataset::Pagination)
       paginated.set_pagination_info(page_no, page_size, record_count || count)
     end
       
     # Yields a paginated dataset for each page and returns the receiver. Does
-    # a count to find the total number of records for this dataset.
+    # a count to find the total number of records for this dataset. Returns
+    # an enumerator if no block is given.
     def each_page(page_size)
       raise(Error, "You cannot paginate a dataset that already has a limit") if @opts[:limit]
+      return to_enum(:each_page, page_size) unless block_given?
       record_count = count
       total_pages = (record_count / page_size.to_f).ceil
       (1..total_pages).each{|page_no| yield paginate(page_no, page_size, record_count)}
       self
     end
+  end
 
+  class Dataset
     # Holds methods that only relate to paginated datasets. Paginated dataset
     # have pages starting at 1 (page 1 is offset 0, page 1 is offset page_size).
     module Pagination
@@ -39,7 +62,8 @@ module Sequel
       attr_accessor :page_size
 
       # The number of pages in the dataset before pagination, of which
-      # this paginated dataset is one.
+      # this paginated dataset is one.  Empty datasets are considered
+      # to have a single page.
       attr_accessor :page_count
 
       # The current page of the dataset, starting at 1 and not 0.
@@ -99,8 +123,11 @@ module Sequel
         @page_size = page_size
         @pagination_record_count = record_count
         @page_count = (record_count / page_size.to_f).ceil
+        @page_count = 1 if @page_count == 0
         self
       end
     end
   end
+
+  Dataset.register_extension(:pagination, DatasetPagination)
 end

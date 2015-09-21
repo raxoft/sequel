@@ -23,11 +23,11 @@ module Sequel
     #   end
     module Tree
       # Create parent and children associations.  Any options
-      # specified are passed to both associations.  You can
-      # specify options to use for the parent association
-      # using a :parent option, and options to use for the
+      # specified are passed to both associations.  You can also
+      # specify options to use for just the parent association
+      # using a :parent option, and options to use for just the
       # children association using a :children option.
-      def self.apply(model, opts={})
+      def self.apply(model, opts=OPTS)
         opts = opts.dup
         opts[:class] = model
 
@@ -38,10 +38,14 @@ module Sequel
         
         par = opts.merge(opts.fetch(:parent, {}))
         parent = par.fetch(:name, :parent)
-        model.many_to_one parent, par
         
         chi = opts.merge(opts.fetch(:children, {}))
         children = chi.fetch(:name, :children)
+
+        par[:reciprocal] = children
+        chi[:reciprocal] = parent
+
+        model.many_to_one parent, par
         model.one_to_many children, chi
 
         model.plugin SingleRoot if opts[:single_root]
@@ -55,12 +59,7 @@ module Sequel
         # parent of the leaf.
         attr_accessor :parent_column
 
-        # Copy the +parent_column+ and +order_column+ to the subclass.
-        def inherited(subclass)
-          super
-          subclass.parent_column = parent_column
-          subclass.tree_order = tree_order 
-        end
+        Plugins.inherited_instance_variables(self, :@parent_column=>nil, :@tree_order=>nil)
 
         # Returns list of all root nodes (those with no parent nodes).
         #
@@ -71,9 +70,9 @@ module Sequel
         
         # Returns the dataset for retrieval of all root nodes
         #
-        #   TreeClass.roots_dataset => Sequel#Dataset
+        #   TreeClass.roots_dataset # => Sequel::Dataset instance
         def roots_dataset
-          ds = filter(parent_column => nil)
+          ds = where(Sequel.or(Array(parent_column).zip([])))
           ds = ds.order(*tree_order) if tree_order
           ds
         end
@@ -89,12 +88,12 @@ module Sequel
           nodes
         end
 
-        # Returns list of ancestors, starting from parent until root.
+        # Returns list of descendants
         #
-        #   subchild1.ancestors # => [child1, root]
+        #   node.descendants # => [child1, child2, subchild1_1, subchild1_2, subchild2_1, subchild2_2]
         def descendants
           nodes = children.dup
-          nodes.each{|child| nodes.concat(child.descendants)}
+          children.each{|child| nodes.concat(child.descendants)}
           nodes 
         end
 
@@ -106,7 +105,7 @@ module Sequel
 
         # Returns true if this is a root node, false otherwise.
         def root?
-          !new? && self[model.parent_column].nil?
+          !new? && possible_root?
         end
 
         # Returns all siblings and a reference to the current node.
@@ -122,6 +121,13 @@ module Sequel
         def siblings
           self_and_siblings - [self]
         end
+
+        private
+
+        # True if if all parent columns values are not NULL.
+        def possible_root?
+          !Array(model.parent_column).map{|c| self[c]}.all?
+        end
       end
 
       # Plugin included when :single_root option is passed.
@@ -136,7 +142,7 @@ module Sequel
         module InstanceMethods
           # Hook that prevents a second root from being created.
           def before_save
-            if self[model.parent_column].nil? && (root = model.root) && pk != root.pk
+            if possible_root? && (root = model.root) && pk != root.pk
               raise TreeMultipleRootError, "there is already a root #{model.name} defined"
             end
             super

@@ -1,6 +1,6 @@
-module Sequel
-  tsk_require 'nokogiri'
+require 'nokogiri'
 
+module Sequel
   module Plugins
     # The xml_serializer plugin handles serializing entire Sequel::Model
     # objects to XML, and deserializing XML into a single Sequel::Model
@@ -12,50 +12,50 @@ module Sequel
     #   album = Album[1]
     #   puts album.to_xml
     #   # Output:
-    #   <?xml version="1.0"?>
-    #   <album>
-    #     <id>1</id>
-    #     <name>RF</name>
-    #     <artist_id>2</artist_id>
-    #   </album>
+    #   # <?xml version="1.0"?>
+    #   # <album>
+    #   #   <id>1</id>
+    #   #   <name>RF</name>
+    #   #   <artist_id>2</artist_id>
+    #   # </album>
     #
     # You can provide options to control the XML output:
     #
     #   puts album.to_xml(:only=>:name)
     #   puts album.to_xml(:except=>[:id, :artist_id])
     #   # Output:
-    #   <?xml version="1.0"?>
-    #   <album>
-    #     <name>RF</name>
-    #   </album>
+    #   # <?xml version="1.0"?>
+    #   # <album>
+    #   #   <name>RF</name>
+    #   # </album>
     #
     #   album.to_xml(:include=>:artist)
     #   # Output:
-    #   <?xml version="1.0"?>
-    #   <album>
-    #     <id>1</id>
-    #     <name>RF</name>
-    #     <artist_id>2</artist_id>
-    #     <artist>
-    #       <id>2</id>
-    #       <name>YJM</name>
-    #     </artist>
-    #   </album>
+    #   # <?xml version="1.0"?>
+    #   # <album>
+    #   #   <id>1</id>
+    #   #   <name>RF</name>
+    #   #   <artist_id>2</artist_id>
+    #   #   <artist>
+    #   #     <id>2</id>
+    #   #     <name>YJM</name>
+    #   #   </artist>
+    #   # </album>
     # 
     # You can use a hash value with <tt>:include</tt> to pass options
     # to associations:
     #
-    #   album.to_json(:include=>{:artist=>{:only=>:name}})
+    #   album.to_xml(:include=>{:artist=>{:only=>:name}})
     #   # Output:
-    #   <?xml version="1.0"?>
-    #   <album>
-    #     <id>1</id>
-    #     <name>RF</name>
-    #     <artist_id>2</artist_id>
-    #     <artist>
-    #       <name>YJM</name>
-    #     </artist>
-    #   </album>
+    #   # <?xml version="1.0"?>
+    #   # <album>
+    #   #   <id>1</id>
+    #   #   <name>RF</name>
+    #   #   <artist_id>2</artist_id>
+    #   #   <artist>
+    #   #     <name>YJM</name>
+    #   #   </artist>
+    #   # </album>
     #
     # +to_xml+ also exists as a class and dataset method, both
     # of which return all objects in the dataset:
@@ -103,9 +103,6 @@ module Sequel
     #
     #   album.from_xml(xml, :associations=>{:artist=>{:fields=>%w'id name', :associations=>:tags}})
     #
-    # If the xml is trusted and should be allowed to set all column and association
-    # values, you can use the :all_columns and :all_associations options.
-    #
     # Usage:
     #
     #   # Add XML output capability to all model subclass instances (called before loading subclasses)
@@ -116,21 +113,21 @@ module Sequel
     module XmlSerializer
       module ClassMethods
         # Proc that camelizes the input string, used for the :camelize option
-        CAMELIZE = proc{|s| s.camelize}
+        CAMELIZE = proc(&:camelize)
 
         # Proc that dasherizes the input string, used for the :dasherize option
-        DASHERIZE = proc{|s| s.dasherize}
+        DASHERIZE = proc(&:dasherize)
 
         # Proc that returns the input string as is, used if
         # no :name_proc, :dasherize, or :camelize option is used.
         IDENTITY = proc{|s| s}
 
         # Proc that underscores the input string, used for the :underscore option
-        UNDERSCORE = proc{|s| s.underscore}
+        UNDERSCORE = proc(&:underscore)
 
         # Return an array of instances of this class based on
         # the provided XML.
-        def array_from_xml(xml, opts={})
+        def array_from_xml(xml, opts=OPTS)
           node = Nokogiri::XML(xml).children.first
           unless node 
             raise Error, "Malformed XML used"
@@ -140,26 +137,21 @@ module Sequel
 
         # Return an instance of this class based on the provided
         # XML.
-        def from_xml(xml, opts={})
+        def from_xml(xml, opts=OPTS)
           from_xml_node(Nokogiri::XML(xml).children.first, opts)
         end
 
         # Return an instance of this class based on the given
         # XML node, which should be Nokogiri::XML::Node instance.
         # This should probably not be used directly by user code.
-        def from_xml_node(parent, opts={})
+        def from_xml_node(parent, opts=OPTS)
           new.from_xml_node(parent, opts)
-        end
-
-        # Call the dataset +to_xml+ method.
-        def to_xml(opts={})
-          dataset.to_xml(opts)
         end
 
         # Return an appropriate Nokogiri::XML::Builder instance
         # used to create the XML.  This should probably not be used
         # directly by user code.
-        def xml_builder(opts={})
+        def xml_builder(opts=OPTS)
           if opts[:builder]
             opts[:builder]
           else
@@ -176,7 +168,7 @@ module Sequel
         # Return a proc (or any other object that responds to []),
         # used for formatting XML tag names when serializing to XML.
         # This should probably not be used directly by user code.
-        def xml_deserialize_name_proc(opts={})
+        def xml_deserialize_name_proc(opts=OPTS)
           if opts[:name_proc]
             opts[:name_proc]
           elsif opts[:underscore]
@@ -189,7 +181,7 @@ module Sequel
         # Return a proc (or any other object that responds to []),
         # used for formatting XML tag names when serializing to XML.
         # This should probably not be used directly by user code.
-        def xml_serialize_name_proc(opts={})
+        def xml_serialize_name_proc(opts=OPTS)
           pr = if opts[:name_proc]
             opts[:name_proc]
           elsif opts[:dasherize]
@@ -201,6 +193,8 @@ module Sequel
           end
           proc{|s| "#{pr[s]}_"}
         end
+
+        Plugins.def_dataset_methods(self, :to_xml)
       end
 
       module InstanceMethods
@@ -213,7 +207,7 @@ module Sequel
         # :underscore :: Sets the :name_proc option to one that calls +underscore+
         #                on the input string.  Requires that you load the inflector
         #                extension or another library that adds String#underscore.
-        def from_xml(xml, opts={})
+        def from_xml(xml, opts=OPTS)
           from_xml_node(Nokogiri::XML(xml).children.first, opts)
         end
 
@@ -222,22 +216,12 @@ module Sequel
         # By default, just calls set with a hash created from the content of the node.
         # 
         # Options:
-        # :all_associations :: Indicates that all associations supported by the model should be tried.
-        #                      This option also cascades to associations if used. It is better to use the
-        #                      :associations option instead of this option. This option only exists for
-        #                      backwards compatibility.
-        # :all_columns :: Overrides the setting logic allowing all setter methods be used,
-        #                 even if access to the setter method is restricted.
-        #                 This option cascades to associations if used, and can be reset in those associations
-        #                 using the :all_columns=>false or :fields options.  This option is considered a
-        #                 security risk, and only exists for backwards compatibility.  It is better to use
-        #                 the :fields option appropriately instead of this option, or no option at all.
         # :associations :: Indicates that the associations cache should be updated by creating
         #                  a new associated object using data from the hash.  Should be a Symbol
         #                  for a single association, an array of symbols for multiple associations,
         #                  or a hash with symbol keys and dependent association option hash values.
         # :fields :: Changes the behavior to call set_fields using the provided fields, instead of calling set.
-        def from_xml_node(parent, opts={})
+        def from_xml_node(parent, opts=OPTS)
           unless parent
             raise Error, "Malformed XML used"
           end
@@ -245,14 +229,7 @@ module Sequel
             raise Error, "XML consisting of just text nodes used"
           end
 
-          unless assocs = opts[:associations]
-            if opts[:all_associations]
-              assocs = {}
-              model.associations.each{|v| assocs[v] = {:all_associations=>true}}
-            end
-          end
-
-          if assocs
+          if assocs = opts[:associations]
             assocs = case assocs
             when Symbol
               {assocs=>{}}
@@ -266,23 +243,18 @@ module Sequel
               raise Error, ":associations should be Symbol, Array, or Hash if present"
             end
 
-            if opts[:all_columns]
-              assocs.each_value do |assoc_opts|
-                assoc_opts[:all_columns] = true unless assoc_opts.has_key?(:fields) || assoc_opts.has_key?(:all_columns)
-              end
-            end
-
             assocs_hash = {}
             assocs.each{|k,v| assocs_hash[k.to_s] = v}
             assocs_present = []
           end
 
           hash = {}
+          populate_associations = {}
           name_proc = model.xml_deserialize_name_proc(opts)
           parent.children.each do |node|
             next if node.is_a?(Nokogiri::XML::Text)
             k = name_proc[node.name]
-            if assocs_hash && (assoc = assocs_hash[k])
+            if assocs_hash && assocs_hash[k]
               assocs_present << [k.to_sym, node]
             else
               hash[k] = node.key?('nil') ? nil : node.children.first.to_s
@@ -297,7 +269,7 @@ module Sequel
                 raise Error, "Association #{assoc} is not defined for #{model}"
               end
 
-              associations[assoc] = if r.returns_array?
+              populate_associations[assoc] = if r.returns_array?
                 node.children.reject{|c| c.is_a?(Nokogiri::XML::Text)}.map{|c| r.associated_class.from_xml_node(c, assoc_opts)}
               else
                 r.associated_class.from_xml_node(node, assoc_opts)
@@ -307,17 +279,12 @@ module Sequel
 
           if fields = opts[:fields]
             set_fields(hash, fields, opts)
-          elsif opts[:all_columns]
-            meths = methods.collect{|x| x.to_s}.grep(Model::SETTER_METHOD_REGEXP) - Model::RESTRICTED_SETTER_METHODS
-            hash.each do |k, v|
-              if meths.include?(setter_meth = "#{k}=")
-                send(setter_meth, v)
-              else
-                raise Error, "Entry in XML does not have a matching setter method: #{k}"
-              end
-            end
           else
             set(hash)
+          end
+
+          populate_associations.each do |assoc, values|
+            associations[assoc] = values
           end
 
           self
@@ -361,7 +328,7 @@ module Sequel
         #               an array of objects using Model.to_xml or Dataset#to_xml.
         # :types :: Set to true to include type information for
         #           all of the columns, pulled from the db_schema.
-        def to_xml(opts={})
+        def to_xml(opts=OPTS)
           vals = values
           types = opts[:types]
           inc = opts[:include]
@@ -400,7 +367,7 @@ module Sequel
 
         # Handle associated objects and virtual attributes when creating
         # the xml.
-        def to_xml_include(node, i, opts={})
+        def to_xml_include(node, i, opts=OPTS)
           name_proc = model.xml_serialize_name_proc(opts)
           objs = send(i)
           if objs.is_a?(Array) && objs.all?{|x| x.is_a?(Sequel::Model)}
@@ -420,7 +387,7 @@ module Sequel
         # this dataset.  Takes all of the options available to Model#to_xml,
         # as well as the :array_root_name option for specifying the name of
         # the root node that contains the nodes for all of the instances.
-        def to_xml(opts={})
+        def to_xml(opts=OPTS)
           raise(Sequel::Error, "Dataset#to_xml") unless row_proc
           x = model.xml_builder(opts)
           name_proc = model.xml_serialize_name_proc(opts)

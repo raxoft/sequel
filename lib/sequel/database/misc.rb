@@ -18,6 +18,41 @@ module Sequel
     # have specific support for the database in use.
     DEFAULT_DATABASE_ERROR_REGEXPS = {}.freeze
 
+    # Mapping of schema type symbols to class or arrays of classes for that
+    # symbol.
+    SCHEMA_TYPE_CLASSES = {:string=>String, :integer=>Integer, :date=>Date, :datetime=>[Time, DateTime].freeze,
+      :time=>Sequel::SQLTime, :boolean=>[TrueClass, FalseClass].freeze, :float=>Float, :decimal=>BigDecimal,
+      :blob=>Sequel::SQL::Blob}.freeze
+
+    # Module to be included in shared adapters so that when the DatabaseMethods are
+    # included in the database, the identifier mangling defaults are reset correctly.
+    module ResetIdentifierMangling
+      def extended(obj)
+        obj.send(:reset_identifier_mangling)
+      end
+    end
+
+    # Nested hook Proc; each new hook Proc just wraps the previous one.
+    @initialize_hook = Proc.new {|db| }
+
+    # Register a hook that will be run when a new Database is instantiated. It is
+    # called with the new database handle.
+    def self.after_initialize(&block)
+      raise Error, "must provide block to after_initialize" unless block
+      Sequel.synchronize do
+        previous = @initialize_hook
+        @initialize_hook = Proc.new do |db|
+          previous.call(db)
+          block.call(db)
+        end
+      end
+    end
+
+    # Apply an extension to all Database objects created in the future.
+    def self.extension(*extensions)
+      after_initialize{|db| db.extension(*extensions)}
+    end
+
     # Register an extension callback for Database objects.  ext should be the
     # extension name symbol, and mod should either be a Module that the
     # database is extended with, or a callable object called with the database
@@ -35,6 +70,11 @@ module Sequel
       Sequel.synchronize{EXTENSIONS[ext] = block}
     end
 
+    # Run the after_initialize hook for the given +instance+.
+    def self.run_after_initialize(instance)
+      @initialize_hook.call(instance)
+    end
+
     # Converts a uri to an options hash. These options are then passed
     # to a newly created database object. 
     def self.uri_to_options(uri)
@@ -45,7 +85,7 @@ module Sequel
         :database => (m = /\/(.*)/.match(uri.path)) && (m[1]) }
     end
     private_class_method :uri_to_options
-    
+
     # The options hash for this database
     attr_reader :opts
     
@@ -59,30 +99,30 @@ module Sequel
     # options hash.
     #
     # Accepts the following options:
-    # :default_schema :: The default schema to use, see #default_schema.
     # :default_string_column_size :: The default size of string columns, 255 by default.
-    # :identifier_input_method :: A string method symbol to call on identifiers going into the database
-    # :identifier_output_method :: A string method symbol to call on identifiers coming from the database
-    # :logger :: A specific logger to use
-    # :loggers :: An array of loggers to use
-    # :quote_identifiers :: Whether to quote identifiers
-    # :servers :: A hash specifying a server/shard specific options, keyed by shard symbol 
-    # :single_threaded :: Whether to use a single-threaded connection pool
+    # :identifier_input_method :: A string method symbol to call on identifiers going into the database.
+    # :identifier_output_method :: A string method symbol to call on identifiers coming from the database.
+    # :logger :: A specific logger to use.
+    # :loggers :: An array of loggers to use.
+    # :preconnect :: Whether to automatically connect to the maximum number of servers.
+    # :quote_identifiers :: Whether to quote identifiers.
+    # :servers :: A hash specifying a server/shard specific options, keyed by shard symbol .
+    # :single_threaded :: Whether to use a single-threaded connection pool.
     # :sql_log_level :: Method to use to log SQL to a logger, :info by default.
     #
     # All options given are also passed to the connection pool.
-    def initialize(opts = {}, &block)
+    def initialize(opts = OPTS, &block)
       @opts ||= opts
       @opts = connection_pool_default_options.merge(@opts)
       @loggers = Array(@opts[:logger]) + Array(@opts[:loggers])
       self.log_warn_duration = @opts[:log_warn_duration]
       block ||= proc{|server| connect(server)}
       @opts[:servers] = {} if @opts[:servers].is_a?(String)
+      @sharded = !!@opts[:servers]
       @opts[:adapter_class] = self.class
       
-      @opts[:single_threaded] = @single_threaded = typecast_value_boolean(@opts.fetch(:single_threaded, @@single_threaded))
+      @opts[:single_threaded] = @single_threaded = typecast_value_boolean(@opts.fetch(:single_threaded, Database.single_threaded))
       @schemas = {}
-      @default_schema = @opts.fetch(:default_schema, default_schema_default)
       @default_string_column_size = @opts[:default_string_column_size] || DEFAULT_STRING_COLUMN_SIZE
       @prepared_statements = {}
       @transactions = {}
@@ -93,10 +133,19 @@ module Sequel
       @dataset_class = dataset_class_default
       @cache_schema = typecast_value_boolean(@opts.fetch(:cache_schema, true))
       @dataset_modules = []
+      @symbol_literal_cache = {}
+      @schema_type_classes = SCHEMA_TYPE_CLASSES.dup
       self.sql_log_level = @opts[:sql_log_level] ? @opts[:sql_log_level].to_sym : :info
       @pool = ConnectionPool.get_pool(self, @opts)
 
-      Sequel.synchronize{::Sequel::DATABASES.push(self)}
+      reset_identifier_mangling
+      adapter_initialize
+
+      unless typecast_value_boolean(@opts[:keep_reference]) == false
+        Sequel.synchronize{::Sequel::DATABASES.push(self)}
+      end
+      Sequel::Database.run_after_initialize(self)
+      @pool.send(:preconnect) if typecast_value_boolean(@opts[:preconnect]) && @pool.respond_to?(:preconnect, true)
     end
 
     # If a transaction is not currently in process, yield to the block immediately.
@@ -104,7 +153,7 @@ module Sequel
     # in progress transaction commits (and only if it commits).
     # Options:
     # :server :: The server/shard to use.
-    def after_commit(opts={}, &block)
+    def after_commit(opts=OPTS, &block)
       raise Error, "must provide block to after_commit" unless block
       synchronize(opts[:server]) do |conn|
         if h = _trans(conn)
@@ -121,7 +170,7 @@ module Sequel
     # in progress transaction rolls back (and only if it rolls back).
     # Options:
     # :server :: The server/shard to use.
-    def after_rollback(opts={}, &block)
+    def after_rollback(opts=OPTS, &block)
       raise Error, "must provide block to after_rollback" unless block
       synchronize(opts[:server]) do |conn|
         if h = _trans(conn)
@@ -150,7 +199,7 @@ module Sequel
         if pr = Sequel.synchronize{EXTENSIONS[ext]}
           pr.call(self)
         else
-          raise(Error, "Extension #{ext} does not have specific support handling individual databases")
+          raise(Error, "Extension #{ext} does not have specific support handling individual databases (try: Sequel.extension #{ext.inspect})")
         end
       end
       self
@@ -163,16 +212,10 @@ module Sequel
       Sequel.convert_output_timestamp(v, timezone)
     end
 
-    # Whether the database uses a global namespace for the index.  If
-    # false, the indexes are going to be namespaced per table.
-    def global_index_namespace?
-      true
-    end
-
     # Return true if already in a transaction given the options,
     # false otherwise.  Respects the :server option for selecting
     # a shard.
-    def in_transaction?(opts={})
+    def in_transaction?(opts=OPTS)
       synchronize(opts[:server]){|conn| !!_trans(conn)}
     end
 
@@ -196,6 +239,17 @@ module Sequel
       schema_utility_dataset.literal(v)
     end
 
+    # Return the literalized version of the symbol if cached, or
+    # nil if it is not cached.
+    def literal_symbol(sym)
+      Sequel.synchronize{@symbol_literal_cache[sym]}
+    end
+
+    # Set the cached value of the literal symbol.
+    def literal_symbol_set(sym, lit)
+      Sequel.synchronize{@symbol_literal_cache[sym] = lit}
+    end
+
     # Synchronize access to the prepared statements cache.
     def prepared_statement(name)
       Sequel.synchronize{prepared_statements[name]}
@@ -207,6 +261,11 @@ module Sequel
     def quote_identifier(v)
       schema_utility_dataset.quote_identifier(v)
     end
+
+    # Return ruby class or array of classes for the given type symbol.
+    def schema_type_class(type)
+      @schema_type_classes[type]
+    end
     
     # Default serial primary key options, used by the table creation
     # code.
@@ -216,58 +275,14 @@ module Sequel
 
     # Cache the prepared statement object at the given name.
     def set_prepared_statement(name, ps)
+      ps.prepared_sql
       Sequel.synchronize{prepared_statements[name] = ps}
     end
 
-    # Whether the database supports CREATE TABLE IF NOT EXISTS syntax,
-    # false by default.
-    def supports_create_table_if_not_exists?
-      false
-    end
-
-    # Whether the database supports deferrable constraints, false
-    # by default as few databases do.
-    def supports_deferrable_constraints?
-      false
-    end
-
-    # Whether the database supports deferrable foreign key constraints,
-    # false by default as few databases do.
-    def supports_deferrable_foreign_key_constraints?
-      supports_deferrable_constraints?
-    end
-
-    # Whether the database supports DROP TABLE IF EXISTS syntax,
-    # default is the same as #supports_create_table_if_not_exists?.
-    def supports_drop_table_if_exists?
-      supports_create_table_if_not_exists?
-    end
-
-    # Whether the database and adapter support prepared transactions
-    # (two-phase commit), false by default.
-    def supports_prepared_transactions?
-      false
-    end
-
-    # Whether the database and adapter support savepoints, false by default.
-    def supports_savepoints?
-      false
-    end
-
-    # Whether the database and adapter support savepoints inside prepared transactions
-    # (two-phase commit), default is false.
-    def supports_savepoints_in_prepared_transactions?
-      supports_prepared_transactions? && supports_savepoints?
-    end
-
-    # Whether the database and adapter support transaction isolation levels, false by default.
-    def supports_transaction_isolation_levels?
-      false
-    end
-
-    # Whether DDL statements work correctly in transactions, false by default.
-    def supports_transactional_ddl?
-      false
+    # Whether this database instance uses multiple servers, either for sharding
+    # or for master/slave.
+    def sharded?
+      @sharded
     end
 
     # The timezone to use for this database, defaulting to <tt>Sequel.database_timezone</tt>.
@@ -310,6 +325,10 @@ module Sequel
     
     private
     
+    # Per adapter initialization method, empty by default.
+    def adapter_initialize
+    end
+
     # Returns true when the object is considered blank.
     # The only objects that are blank are nil, false,
     # strings with all whitespace, and ones that respond
@@ -363,19 +382,19 @@ module Sequel
           return klass
         end
       else
-        database_error_regexps.each do |regexp, klass|
-          return klass if exception.message =~ regexp
+        database_error_regexps.each do |regexp, klss|
+          return klss if exception.message =~ regexp
         end
       end
 
       nil
     end
     
-    NOT_NULL_CONSTRAINT_SQLSTATES = %w'23502'.freeze.each{|s| s.freeze}
-    FOREIGN_KEY_CONSTRAINT_SQLSTATES = %w'23503 23506 23504'.freeze.each{|s| s.freeze}
-    UNIQUE_CONSTRAINT_SQLSTATES = %w'23505'.freeze.each{|s| s.freeze}
-    CHECK_CONSTRAINT_SQLSTATES = %w'23513 23514'.freeze.each{|s| s.freeze}
-    SERIALIZATION_CONSTRAINT_SQLSTATES = %w'40001'.freeze.each{|s| s.freeze}
+    NOT_NULL_CONSTRAINT_SQLSTATES = %w'23502'.freeze.each(&:freeze)
+    FOREIGN_KEY_CONSTRAINT_SQLSTATES = %w'23503 23506 23504'.freeze.each(&:freeze)
+    UNIQUE_CONSTRAINT_SQLSTATES = %w'23505'.freeze.each(&:freeze)
+    CHECK_CONSTRAINT_SQLSTATES = %w'23513 23514'.freeze.each(&:freeze)
+    SERIALIZATION_CONSTRAINT_SQLSTATES = %w'40001'.freeze.each(&:freeze)
     # Given the SQLState, return the appropriate DatabaseError subclass.
     def database_specific_error_class_from_sqlstate(sqlstate)
       case sqlstate
@@ -399,18 +418,12 @@ module Sequel
     
     # Convert the given exception to an appropriate Sequel::DatabaseError
     # subclass, keeping message and traceback.
-    def raise_error(exception, opts={})
+    def raise_error(exception, opts=OPTS)
       if !opts[:classes] || Array(opts[:classes]).any?{|c| exception.is_a?(c)}
         raise Sequel.convert_exception_class(exception, database_error_class(exception, opts))
       else
         raise exception
       end
-    end
-    
-    # Whether the database supports CREATE OR REPLACE VIEW.  If not, support
-    # will be emulated by dropping the view first. false by default.
-    def supports_create_or_replace_view?
-      false
     end
 
     # Typecast the value to an SQL::Blob
@@ -500,7 +513,12 @@ module Sequel
 
     # Typecast the value to a String
     def typecast_value_string(value)
-      value.to_s
+      case value
+      when Hash, Array
+        raise Sequel::InvalidValue, "invalid value for String: #{value.inspect}"
+      else
+        value.to_s
+      end
     end
 
     # Typecast the value to a Time

@@ -2,10 +2,6 @@
 # returns a cloned dataset that will never issue a query to the
 # database.  It implements the null object pattern for datasets.
 #
-# To load the extension:
-#
-#   Sequel.extension :null_dataset
-#
 # The most common usage is probably in a method that must return
 # a dataset, where the method knows the dataset shouldn't return
 # anything.  With standard Sequel, you'd probably just add a
@@ -26,14 +22,35 @@
 # the same options to get the columns.
 #
 # This extension uses Object#extend at runtime, which can hurt performance.
+#
+# To add the nullify method to a single dataset:
+#
+#   ds = ds.extension(:null_dataset)
+#
+# To add the nullify method to all datasets on a single database:
+#
+#   DB.extension(:null_dataset)
 
+#
 module Sequel
   class Dataset
+    module Nullifiable
+      # Return a cloned nullified dataset.
+      def nullify
+        clone.nullify!
+      end
+
+      # Nullify the current dataset
+      def nullify!
+        extend NullDataset
+      end
+    end
+
     module NullDataset
       # Create a new dataset from the dataset (which won't
       # be nulled) to get the columns if they aren't already cached.
       def columns
-        @columns ||= db.dataset(@opts).columns
+        @columns ||= db.dataset.clone(@opts).columns
       end
 
       # Return 0 without sending a database query.
@@ -62,7 +79,7 @@ module Sequel
       end
 
       # Return 0 without sending a database query.
-      def update(v={})
+      def update(v=OPTS)
         0
       end
 
@@ -79,18 +96,10 @@ module Sequel
       # make them noops.  There's nothing we can do if the db
       # is accessed directly to make a change, though.
       (%w'_ddl _dui _insert' << '').each do |m|
-        class_eval("private; def execute#{m}(sql, opts={}) end", __FILE__, __LINE__)
+        class_eval("private; def execute#{m}(sql, opts=OPTS) end", __FILE__, __LINE__)
       end
     end
-
-    # Return a cloned nullified dataset.
-    def nullify
-      clone.nullify!
-    end
-
-    # Nullify the current dataset
-    def nullify!
-      extend NullDataset
-    end
   end
+
+  Dataset.register_extension(:null_dataset, Dataset::Nullifiable)
 end

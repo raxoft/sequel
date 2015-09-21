@@ -1,11 +1,22 @@
+Sequel::JDBC.load_driver('com.ibm.as400.access.AS400JDBCDriver')
 Sequel.require 'adapters/jdbc/transactions'
+Sequel.require 'adapters/utils/emulate_offset_with_row_number'
 
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:as400] = proc do |db|
+        db.extend(Sequel::JDBC::AS400::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::AS400::Dataset
+        com.ibm.as400.access.AS400JDBCDriver
+      end
+    end
+
     # Database and Dataset support for AS400 databases accessed via JDBC.
     module AS400
       # Instance methods for AS400 Database objects accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::JDBC::Transactions
 
         TRANSACTION_BEGIN = 'Transaction.begin'.freeze
@@ -18,7 +29,7 @@ module Sequel
         end
 
         # TODO: Fix for AS400
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           nil
         end
 
@@ -29,8 +40,12 @@ module Sequel
 
         private
 
+        def disconnect_error?(exception, opts)
+          super || exception.message =~ /\AThe connection does not exist\./
+        end
+
         # Use JDBC connection's setAutoCommit to false to start transactions
-        def begin_transaction(conn, opts={})
+        def begin_transaction(conn, opts=OPTS)
           set_transaction_isolation(conn, opts)
           super
         end

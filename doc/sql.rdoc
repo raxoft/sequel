@@ -78,7 +78,7 @@ Almost everywhere in Sequel, you can drop down to literal SQL by providing a lit
   DB[:albums].select('name') # SELECT 'name' FROM albums
   DB[:albums].select(Sequel.lit('name')) # SELECT name FROM albums
 
-For a simpler way of creating literal strings, you can also use the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html], which adds the <tt>String#lit</tt> method, and other methods that integrate Sequel's DSL with the ruby language:
+For a simpler way of creating literal strings, you can also use the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc], which adds the <tt>String#lit</tt> method, and other methods that integrate Sequel's DSL with the ruby language:
 
   DB[:albums].select('name'.lit)
 
@@ -86,13 +86,13 @@ So you can use Sequel's DSL everywhere you find it helpful, and fallback to lite
 
 == Translating SQL Expressions into Sequel
 
-The rest of this guide assumes you want to use Sequel's DSL to represent your query, that you know how to write the query in SQL, but you aren't sure how to write it in Sequel.
+The rest of this guide assumes you want to use Sequel's DSL to represent your query, that you know how to write the query in SQL, but you aren't sure how to write it in Sequel's DSL.
 
 This section will describe how specific SQL expressions are handled in Sequel.  The next section will discuss how to create queries by using method chaining on datasets.
 
 === <tt>Database#literal</tt>
 
-Before we get started, I think it's important to get familiar with the <tt>Database#literal</tt> method, which will return the SQL that will be used for a given expression:
+It's important to get familiar with the <tt>Database#literal</tt> method, which will return the SQL that will be used for a given expression:
 
   DB.literal(1)
   # => "1"
@@ -101,7 +101,7 @@ Before we get started, I think it's important to get familiar with the <tt>Datab
   DB.literal('string')
   # => "'string'"
 
-I encourage you to just play around to see how different objects get literalized into SQL
+Try playing around to see how different objects get literalized into SQL
 
 === Database Loggers
 
@@ -137,7 +137,7 @@ The other way to qualify an identifier is to use the <tt>Sequel.qualify</tt> wit
 
   Sequel.qualify(:table, :column) # "table"."column"
 
-Another way to generate identifiers is to use Sequel's {virtual row support}[link:files/doc/virtual_rows_rdoc.html]:
+Another way to generate identifiers is to use Sequel's {virtual row support}[rdoc-ref:doc/virtual_rows.rdoc]:
 
   DB[:albums].select{name} # SELECT "name" FROM "albums"
   DB[:albums].select{albums__name} # SELECT "albums"."name" FROM "albums"
@@ -178,11 +178,15 @@ You can also use the <tt>Sequel.as</tt> method to create an alias, and the +as+ 
   Sequel.as(:column, :alias) # "column" AS "alias"
   Sequel.qualify(:table, :column).as(:alias) # "table"."column" AS "alias"
 
+If you want to use a derived column list, you can provide an array of column aliases:
+
+  Sequel.as(:table, :alias, [:c1, :c2]) # "table" AS "alias"("c1", "c2")
+
 === Functions
 
 The easiest way to use SQL functions is via a virtual row:
 
-  DB[:albums].select{func{}} # SELECT func() FROM "albums"
+  DB[:albums].select{func.function} # SELECT func() FROM "albums"
   DB[:albums].select{func(col1, col2)} # SELECT func("col1", "col2") FROM "albums"
 
 You can also use the <tt>Sequel.function</tt> method on the symbol that contains the function name:
@@ -196,33 +200,51 @@ Aggregate functions work the same way as normal functions, since they share the 
 
   Sequel.function(:sum, :column) # sum(column)
 
-However, if you want to use the DISTINCT modifier to an aggregate function, you either have to use literal SQL or a virtual row block:
+To use the DISTINCT modifier to an aggregate function, call the distinct method on the function:
 
-  Sequel.function(:sum, Sequel.lit('DISTINCT column')) # sum(DISTINCT column)
-  DB[:albums].select{sum(:distinct, :column){}} # SELECT sum(DISTINCT column) FROM albums
+  DB[:albums].select{sum(:column).distinct} # SELECT sum(DISTINCT column) FROM albums
 
-If you want to use the wildcard as the sole argument of the aggregate function, you again have to use literal SQL or a virtual row block:
+If you want to use the wildcard as the sole argument of the aggregate function, use the * method on the Function:
 
-  Sequel.function(:count, Sequel.lit('*')) # count(*)
-  DB[:albums].select{count(:*){}} # SELECT count(*) FROM albums
+  Sequel.function(:count).* # count(*)
+  DB[:albums].select{count.function.*} # SELECT count(*) FROM albums
 
 Note that Sequel provides helper methods for aggregate functions such as +count+, +sum+, +min+, +max+, +avg+, and +group_and_count+, which handle common uses of aggregate functions.
 
 === Window Functions
 
-If the database supports window functions, Sequel can handle them using a virtual row block:
+If the database supports window functions, Sequel can handle them by calling the over method on a Function:
 
-  DB[:albums].select{function(:over){}}
+  DB[:albums].select{function.function.over}
   # SELECT function() OVER () FROM albums
 
-  DB[:albums].select{count(:over, :*=>true){}}
+  DB[:albums].select{count.function.*.over}
   # SELECT count(*) OVER () FROM albums
 
-  DB[:albums].select{function(:over, :args=>col1, :partition=>col2, :order=>col3){}}
+  DB[:albums].select{function(:col1).over(:partition=>col2, :order=>col3)}
   # SELECT function(col1) OVER (PARTITION BY col2 ORDER BY col3) FROM albums
 
-  DB[:albums].select{function(:over, :args=>[c1, c2], :partition=>[c3, c4], :order=>[c5, c6]){}}
+  DB[:albums].select{function(c1, c2).over(:partition=>[c3, c4], :order=>[c5, c6])}
   # SELECT function(c1, c2) OVER (PARTITION BY c3, c4 ORDER BY c5, c6) FROM albums
+
+=== Schema Qualified Functions
+
+If the database supports schema qualified functions, Sequel can handle them by calling the function method on a QuailfiedIdentifier:
+
+  DB[:albums].select{schema__function.function}
+  # SELECT schema.function() FROM albums
+  
+  DB[:albums].select{schema__function.function(col, 2, "a")}
+  # SELECT schema.function(col, 2, 'a') FROM albums
+
+=== Portable/Emulated Functions
+
+Sequel offers some support for portable SQL functions, allowing you to call standard SQL functions, where Sequel will emulate support on databases that lack native support.
+Some examples are:
+
+  Sequel.char_length(:column)    # char_length(column)
+  Sequel.extract(:year, :column) # extract(year FROM column)
+  Sequel.trim(:column)           # trim(column)
 
 === Equality Operator (=)
 
@@ -234,6 +256,10 @@ You can also specify this as an array of two element arrays:
 
   [[:column, 1]] # ("column" = 1)
 
+For expression objects, you can also use the =~ method:
+
+  where{column =~ 1} # ("column" = 1)
+
 === Not Equal Operator (!=)
 
 You can specify a not equals condition by inverting the hash or array of two element arrays using <tt>Sequel.negate</tt> or <tt>Sequel.~</tt>:
@@ -243,10 +269,18 @@ You can specify a not equals condition by inverting the hash or array of two ele
   Sequel.~(:column => 1)        # ("column" != 1)
   Sequel.~([[:column, 1]])      # ("column" != 1)
 
-The difference between the two is that negate only works on hashes and arrays of element arrays, and it negates all entries in the, while ~ does a general inversion.  This is best shown by an example with multiple entries:
+The difference between the two is that negate only works on hashes and arrays of element arrays, and it negates all entries in the hash or array, while ~ does a general inversion.  This is best shown by an example with multiple entries:
 
   Sequel.negate(:column => 1, :foo => 2)   # (("column" != 1) AND (foo != 2))
   Sequel.~(:column => 1, :foo => 2)        # (("column" != 1) OR (foo != 2))
+
+You can also use the ~ method on an equality expression:
+
+  where{~(column =~ 1)} # ("column" != 1)
+
+On Ruby 1.9+, you can use the !~ method:
+
+  where{column !~ 1} # ("column" != 1)
 
 The most common need for not equals is in filters, in which case you can use the +exclude+ method:
 
@@ -266,6 +300,14 @@ As you may have guessed, Sequel switches from an = to an IN when the hash value 
   {:column=>DB[:albums].select(:id)} # ("column" IN (SELECT "id" FROM "albums"))
   Sequel.~(:column=>DB[:albums].select(:id)) # ("column" NOT IN (SELECT "id" FROM "albums"))
 
+Similar to =, you can also use =~ with expressions for inclusion:
+
+  where{column =~ [1, 2, 3]} # ("column" IN (1, 2, 3))
+
+and on Ruby 1.9, !~ for exclusion:
+
+  where{column !~ [1, 2, 3]} # ("column" NOT IN (1, 2, 3))
+
 Sequel also supports the SQL EXISTS operator using <tt>Dataset#exists</tt>:
 
   DB[:albums].exists # EXISTS (SELECT * FROM albums)
@@ -274,15 +316,20 @@ Sequel also supports the SQL EXISTS operator using <tt>Dataset#exists</tt>:
 
 Hashes in Sequel use IS if the value is true, false, or nil:
 
-  {:column=>nil) # ("column" IS NULL)
-  {:column=>true) # ("column" IS TRUE)
-  {:column=>false) # ("column" IS FALSE)
+  {:column=>nil} # ("column" IS NULL)
+  {:column=>true} # ("column" IS TRUE)
+  {:column=>false} # ("column" IS FALSE)
 
 Negation works the same way as it does for equality and inclusion:
 
   Sequel.~(:column=>nil) # ("column" IS NOT NULL)
   Sequel.~(:column=>true) # ("column" IS NOT TRUE)
   Sequel.~(:column=>false) # ("column" IS NOT FALSE)
+
+Likewise, =~ works for identity (and Ruby 1.9, !~ for negative identity):
+
+  where{column =~ nil} # ("column" IS NULL)
+  where{column !~ nil} # ("column" IS NOT NULL)
 
 === Inversion Operator (NOT)
 
@@ -346,17 +393,14 @@ Sequel defines the & and | methods on most Sequel-specific expression objects to
   Sequel.expr(:column1=>1) | {:column2=>2} # (("column1" = 1) OR ("column2" = 2))
   (Sequel.function(:func) > 1) & :column3 # ((func() > 1) AND "column3")
 
-Note the use of parentheses in the last statement.  If you omit them, you won't get what you expect:
+Note the use of parentheses in the last statement.  If you omit them, you won't get what you expect.
+Because & has higher precedence than >
 
-  Sequel.function(:func) > 1 & :column3 # (func() > 1)
+  Sequel.function(:func) > 1 & :column3
 
-This is because & has higher precedence than >, so it is parsed as:
+is parsed as:
 
   Sequel.function(:func) > (1 & :column3)
-
-In this case, <tt>:column3.to_int</tt> returns an odd integer, so:
-
-  1 & :column3 # => 1
 
 You and also use the <tt>Sequel.&</tt> and <tt>Sequel.|</tt> methods:
 
@@ -446,19 +490,19 @@ Just like ruby's <tt>String#join</tt>, you can provide an argument for a string 
 
 For the LIKE operator, Sequel defines the +like+ and +ilike+ methods on most Sequel-specific expression objects:
 
-  Sequel.expr(:name).like('A%') # ("name" LIKE 'A%') 
-  Sequel.expr(:name).ilike('A%') # ("name" ILIKE 'A%') 
+  Sequel.expr(:name).like('A%') # ("name" LIKE 'A%' ESCAPE '\') 
+  Sequel.expr(:name).ilike('A%') # ("name" ILIKE 'A%' ESCAPE '\') 
 
 You can also use the <tt>Sequel.like</tt> and <tt>Sequel.ilike</tt> methods:
 
-  Sequel.like(:name, 'A%') # ("name" LIKE 'A%') 
-  Sequel.ilike(:name, 'A%') # ("name" ILIKE 'A%') 
+  Sequel.like(:name, 'A%') # ("name" LIKE 'A%' ESCAPE '\') 
+  Sequel.ilike(:name, 'A%') # ("name" ILIKE 'A%' ESCAPE '\') 
 
 Note the above syntax for ilike, while Sequel's default, is specific to PostgreSQL.  However, most other adapters override the behavior.  For example, on MySQL, Sequel uses LIKE BINARY for +like+, and LIKE for +ilike+.  If the database supports both case sensitive and case insensitive LIKE, then +like+ will use a case sensitive LIKE, and +ilike+ will use a case insensitive LIKE.
 
 Inverting the LIKE operator works like other inversions:
 
-  ~Sequel.like(:name, 'A%') # ("name" NOT LIKE 'A%')
+  ~Sequel.like(:name, 'A%') # ("name" NOT LIKE 'A%' ESCAPE '\')
 
 Sequel also supports SQL regular expressions on MySQL and PostgreSQL.  You can use these by passing a ruby regular expression to +like+ or +ilike+, or by making the regular expression a hash value:
 
@@ -471,7 +515,7 @@ Note that using +ilike+ with a regular expression will always make the regexp ca
 
 === Order Specifications (ASC, DESC)
 
-Sequel supports specifying ascending or descending order using the asc+ and +desc+ method on most Sequel-specific expression objects:
+Sequel supports specifying ascending or descending order using the +asc+ and +desc+ method on most Sequel-specific expression objects:
 
   Sequel.expr(:column).asc # "column" ASC
   Sequel.expr(:column).qualify(:table).desc # "table"."column" DESC
@@ -496,7 +540,7 @@ To select all columns in a table, Sequel supports the * method on identifiers wi
 
 Sequel allows the easy production of SQL CASE statements using the <tt>Sequel.case</tt> method.  The first argument is a hash or array of two element arrays representing the conditions, the second argument is the default value (ELSE).   The keys of the hash (or first element in each array) is the WHEN condition, and the values of the hash (or second element in each array) is the THEN result.  Here are some examples:
 
-  Sequel.case({:column=>1, 0) # (CASE WHEN "column" THEN 1 ELSE 0 END)
+  Sequel.case({:column=>1}, 0) # (CASE WHEN "column" THEN 1 ELSE 0 END)
   Sequel.case([[column, 1]], 0) # (CASE WHEN "column" THEN 1 ELSE 0 END)
   Sequel.case({{:column=>nil}=>1}, 0) # (CASE WHEN (column IS NULL) THEN 1 ELSE 0 END)
 
@@ -505,7 +549,7 @@ If the hash or array has multiple arguments, multiple WHEN clauses are used:
   Sequel.case({:c=>1, :d=>2}, 0) # (CASE WHEN "c" THEN 1 WHEN "d" THEN 2 ELSE 0 END)
   Sequel.case([[:c, 1], [:d, 2]], 0) # (CASE WHEN "c" THEN 1 WHEN "d" THEN 2 ELSE 0 END)
 
-If you provide a 2nd argument to CASE, it goes between CASE and WHEN:
+If you provide a 3rd argument to <tt>Sequel.case</tt>, it goes between CASE and WHEN:
 
   Sequel.case({2=>1, 3=>5}, 0, :column) # (CASE column WHEN 2 THEN 1 WHEN 3 THEN 5 ELSE 0 END)
 
@@ -538,21 +582,21 @@ If you want to select from multiple FROM tables, use multiple arguments:
 
   DB[:albums, :artists] # SELECT * FROM albums, artists
 
-If you don't want to select from any FROM tables, use no arguments:
+If you don't want to select from any FROM tables, just call dataset:
 
-  DB[] # SELECT *
+  DB.dataset # SELECT *
 
 === Chaining Methods
 
 Once you have your dataset object, you build queries by chaining methods, usually with one method per clause in the query:
 
   DB[:albums].select(:id, :name).where(Sequel.like(:name, 'A%')).order(:name)
-  # SELECT id, name FROM albums WHERE (name LIKE 'A%') ORDER BY name
+  # SELECT id, name FROM albums WHERE (name LIKE 'A%' ESCAPE '\') ORDER BY name
 
 Note that the order of your method chain is not usually important unless you have multiple methods that affect the same clause:
 
   DB[:albums].order(:name).where(Sequel.like(:name, 'A%')).select(:id, :name)
-  # SELECT id, name FROM albums WHERE (name LIKE 'A%') ORDER BY name
+  # SELECT id, name FROM albums WHERE (name LIKE 'A%' ESCAPE '\') ORDER BY name
 
 === Using the Same Dataset for SELECT, INSERT, UPDATE, and DELETE
 
@@ -576,4 +620,4 @@ Note how +update+ and +delete+ used the +where+ argument, but that +insert+ did 
 
 === Methods Used for Each SQL Clause
 
-To see which methods exist that affect each SQL clause, see the {"Dataset Basics" guide}[link:files/doc/dataset_basics_rdoc.html].
+To see which methods exist that affect each SQL clause, see the {"Dataset Basics" guide}[rdoc-ref:doc/dataset_basics.rdoc].

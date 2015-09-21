@@ -1,7 +1,7 @@
 # The pg_interval extension adds support for PostgreSQL's interval type.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when interval type values are retrieved, they are parsed and returned
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when interval type values are retrieved, they are parsed and returned
 # as instances of ActiveSupport::Duration.
 #
 # In addition to the parser, this extension adds literalizers for
@@ -15,9 +15,9 @@
 #
 #   DB.extension :pg_interval
 #
-# If you are not using the native postgres adapter, you probably
-# also want to use the typecast_on_load plugin in the model, and
-# set it to typecast the interval type column(s) on load.
+# If you are not using the native postgres or jdbc/postgresql adapters and are using interval
+# types as model column values you probably should use the
+# pg_typecast_on_load plugin if the column values are returned as a string.
 #
 # This extension integrates with the pg_array extension.  If you plan
 # to use arrays of interval types, load the pg_array extension before the
@@ -31,6 +31,9 @@
 # very simple, and is only designed to parse PostgreSQL's default output
 # format, it is not designed to support all input formats that PostgreSQL
 # supports.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using interval columns in CREATE/ALTER TABLE statements.
 
 require 'active_support/duration'
 Sequel.require 'adapters/utils/pg_types'
@@ -64,7 +67,7 @@ module Sequel
       # Creates callable objects that convert strings into ActiveSupport::Duration instances.
       class Parser
         # Regexp that parses the full range of PostgreSQL interval type output.
-        PARSER = /\A([+-]?\d+ years?\s?)?([+-]?\d+ mons?\s?)?([+-]?\d+ days?\s?)?(?:(?:([+-])?(\d\d):(\d\d):(\d\d(\.\d+)?))|([+-]?\d+ hours?\s?)?([+-]?\d+ mins?\s?)?([+-]?\d+(\.\d+)? secs?\s?)?)?\z/o
+        PARSER = /\A([+-]?\d+ years?\s?)?([+-]?\d+ mons?\s?)?([+-]?\d+ days?\s?)?(?:(?:([+-])?(\d{2,10}):(\d\d):(\d\d(\.\d+)?))|([+-]?\d+ hours?\s?)?([+-]?\d+ mins?\s?)?([+-]?\d+(\.\d+)? secs?\s?)?)?\z/o
 
         # Parse the interval input string into an ActiveSupport::Duration instance.
         def call(string)
@@ -119,7 +122,11 @@ module Sequel
       # Reset the conversion procs if using the native postgres adapter,
       # and extend the datasets to correctly literalize ActiveSupport::Duration values.
       def self.extended(db)
-        db.extend_datasets(IntervalDatasetMethods)
+        db.instance_eval do
+          extend_datasets(IntervalDatasetMethods)
+          copy_conversion_procs([1186, 1187])
+          @schema_type_classes[:interval] = ActiveSupport::Duration
+        end
       end
 
       # Handle ActiveSupport::Duration values in bound variables.

@@ -32,8 +32,12 @@ module Sequel
       DEFAULT_CONSTRAINT_VALIDATIONS_TABLE = :sequel_constraint_validations
 
       # Automatically load the validation_helpers plugin to run the actual validations.
-      def self.apply(model, opts={})
-        model.plugin :validation_helpers
+      def self.apply(model, opts=OPTS)
+        model.instance_eval do
+          plugin :validation_helpers
+          @constraint_validations_table = DEFAULT_CONSTRAINT_VALIDATIONS_TABLE
+          @constraint_validation_options = {}
+        end
       end
 
       # Parse the constraint validations metadata from the database. Options:
@@ -41,9 +45,25 @@ module Sequel
       #                                  metadata table.  Should only be used if the table
       #                                  name was overridden when creating the constraint
       #                                  validations.
-      def self.configure(model, opts={})
-        model.instance_variable_set(:@constraint_validations_table, opts[:constraint_validations_table] || DEFAULT_CONSTRAINT_VALIDATIONS_TABLE)
-        model.send(:parse_constraint_validations)
+      # :validation_options :: Override/augment the options stored in the database with the
+      #                        given options.  Keys should be validation type symbols (e.g.
+      #                        :presence) and values should be hashes of options specific
+      #                        to that validation type.
+      def self.configure(model, opts=OPTS)
+        model.instance_eval do
+          if table = opts[:constraint_validations_table]
+            @constraint_validations_table = table
+          end
+          if vos = opts[:validation_options]
+            vos.each do |k, v|
+              if existing_options = @constraint_validation_options[k]       
+                v = existing_options.merge(v)
+              end
+              @constraint_validation_options[k] = v
+            end
+          end
+          parse_constraint_validations
+        end
       end
 
       module DatabaseMethods
@@ -58,22 +78,18 @@ module Sequel
         # is splatted to send to perform a validation via validation_helpers.
         attr_reader :constraint_validations
 
+        # A hash of reflections of constraint validations.  Keys are type name
+        # symbols.  Each value is an array of pairs, with the first element being
+        # the validation type symbol (e.g. :presence) and the second element being
+        # options for the validation.  If the validation takes an argument, it appears
+        # as the :argument entry in the validation option hash.
+        attr_reader :constraint_validation_reflections
+
         # The name of the table containing the constraint validations metadata.
         attr_reader :constraint_validations_table
 
-        # Copy the name of the constraint validations metadata table into the subclass.
-        def inherited(subclass)
-          super
-          subclass.instance_variable_set(:@constraint_validations_table, @constraint_validations_table)
-        end
-
-        # Parse the constraint validations from the database whenever the dataset
-        # changes.
-        def set_dataset(*)
-          r = super
-          parse_constraint_validations
-          r
-        end
+        Plugins.inherited_instance_variables(self, :@constraint_validations_table=>nil, :@constraint_validation_options=>:hash_dup)
+        Plugins.after_set_dataset(self, :parse_constraint_validations)
 
         private
 
@@ -89,7 +105,7 @@ module Sequel
           unless hash = Sequel.synchronize{db.constraint_validations}
             hash = {}
             db.from(constraint_validations_table).each do |r|
-              (hash[r[:table]] ||= []) << constraint_validation_array(r)
+              (hash[r[:table]] ||= []) << r
             end
             Sequel.synchronize{db.constraint_validations = hash}
           end
@@ -97,14 +113,16 @@ module Sequel
           if @dataset
             ds = @dataset.clone
             ds.quote_identifiers = false
-            table_name = ds.literal(model.table_name)
-            @constraint_validations = Sequel.synchronize{hash[table_name]} || []
+            table_name = ds.literal(ds.first_source_table)
+            reflections = {}
+            @constraint_validations = (Sequel.synchronize{hash[table_name]} || []).map{|r| constraint_validation_array(r, reflections)}
+            @constraint_validation_reflections = reflections
           end
         end
 
         # Given a specific database constraint validation metadata row hash, transform
         # it in an validation method call array suitable for splatting to send.
-        def constraint_validation_array(r)
+        def constraint_validation_array(r, reflections)
           opts = {}
           opts[:message] = r[:message] if r[:message]
           opts[:allow_nil] = true if db.typecast_value(:boolean, r[:allow_nil])
@@ -129,7 +147,7 @@ module Sequel
             arg = arg.split(',')
             type = :includes
           when :includes_int_array
-            arg = arg.split(',').map{|x| x.to_i}
+            arg = arg.split(',').map(&:to_i)
             type = :includes
           when :includes_int_range
             arg = constraint_validation_int_range(arg)
@@ -137,19 +155,32 @@ module Sequel
           end
 
           column = if type == :unique
-            column.split(',').map{|c| c.to_sym}
+            column.split(',').map(&:to_sym)
           else
             column.to_sym
           end
 
+          if type_opts = @constraint_validation_options[type]
+            opts = opts.merge(type_opts)
+          end
+
+          reflection_opts = opts
           a = [:"validates_#{type}"]
+
           if arg
             a << arg
+            reflection_opts = reflection_opts.merge(:argument=>arg)
           end 
           a << column
           unless opts.empty?
             a << opts
           end
+
+          if column.is_a?(Array) && column.length == 1
+            column = column.first
+          end
+          (reflections[column] ||= []) << [type, reflection_opts]
+
           a
         end
 

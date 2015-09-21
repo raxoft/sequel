@@ -7,8 +7,8 @@ module Sequel
     #    cache_store.set(key, obj, time) # Associate the obj with the given key
     #                                    # in the cache for the time (specified
     #                                    # in seconds).
-    #    cache_store.get(key) => obj     # Returns object set with same key.
-    #    cache_store.get(key2) => nil    # nil returned if there isn't an object
+    #    cache_store.get(key) # => obj   # Returns object set with same key.
+    #    cache_store.get(key2) # => nil  # nil returned if there isn't an object
     #                                    # currently in the cache with that key.
     #    cache_store.delete(key)         # Remove key from cache
     #
@@ -34,7 +34,7 @@ module Sequel
     module Caching
       # Set the cache_store and cache_ttl attributes for the given model.
       # If the :ttl option is not given, 3600 seconds is the default.
-      def self.configure(model, store, opts={})
+      def self.configure(model, store, opts=OPTS)
         model.instance_eval do
           @cache_store = store
           @cache_ttl = opts[:ttl] || 3600
@@ -64,24 +64,18 @@ module Sequel
           cache_get(cache_key(pk))
         end
 
+        # Returns the prefix used to namespace this class in the cache.
+        def cache_key_prefix
+          "#{self}"
+        end
+
         # Return a key string for the given primary key.
         def cache_key(pk)
           raise(Error, 'no primary key for this record') unless pk.is_a?(Array) ? pk.all? : pk
-          "#{self}:#{Array(pk).join(',')}"
+          "#{cache_key_prefix}:#{Array(pk).join(',')}"
         end
         
-        # Copy the necessary class instance variables to the subclass.
-        def inherited(subclass)
-          super
-          store = @cache_store
-          ttl = @cache_ttl
-          cache_ignore_exceptions = @cache_ignore_exceptions
-          subclass.instance_eval do
-            @cache_store = store
-            @cache_ttl = ttl
-            @cache_ignore_exceptions = cache_ignore_exceptions
-          end
-        end 
+        Plugins.inherited_instance_variables(self, :@cache_store=>nil, :@cache_ttl=>nil, :@cache_ignore_exceptions=>nil)
 
         # Set the time to live for the cache store, in seconds (default is 3600, # so 1 hour).
         def set_cache_ttl(ttl)
@@ -92,7 +86,11 @@ module Sequel
     
         # Delete the entry with the matching key from the cache
         def cache_delete(ck)
-          @cache_store.delete(ck)
+          if @cache_ignore_exceptions
+            @cache_store.delete(ck) rescue nil
+          else
+            @cache_store.delete(ck)
+          end
           nil
         end
         

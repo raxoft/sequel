@@ -6,6 +6,7 @@
 #
 #   Sequel.extension :migration
 
+#
 module Sequel
   # Sequel's older migration class, available for backward compatibility.
   # Uses subclasses with up and down instance methods for each migration:
@@ -85,7 +86,7 @@ module Sequel
     # Whether to use transactions for this migration, default depends on the
     # database.
     attr_accessor :use_transactions
-
+    
     # Don't set transaction use by default.
     def initialize
       @use_transactions = nil
@@ -202,12 +203,12 @@ module Sequel
       @actions << [:drop_join_table, *args]
     end
 
-    def create_table(*args)
-      @actions << [:drop_table, args.first]
+    def create_table(name, opts=OPTS)
+      @actions << [:drop_table, name, opts]
     end
 
-    def create_view(*args)
-      @actions << [:drop_view, args.first]
+    def create_view(name, _, opts=OPTS)
+      @actions << [:drop_view, name, opts]
     end
 
     def rename_column(table, name, new_name)
@@ -241,11 +242,14 @@ module Sequel
       @actions << [:drop_constraint, args.first]
     end
 
-    def add_foreign_key(*args)
+    def add_foreign_key(key, table, *args)
+      @actions << [:drop_foreign_key, key, *args]
+    end
+
+    def add_primary_key(*args)
       raise if args.first.is_a?(Array)
       @actions << [:drop_column, args.first]
     end
-    alias add_primary_key add_foreign_key
 
     def add_index(*args)
       @actions << [:drop_index, *args]
@@ -366,23 +370,24 @@ module Sequel
 
     # Return whether the migrator is current (i.e. it does not need to make
     # any changes).  Takes the same arguments as #run.
-    def self.is_current?(db, directory, opts={})
+    def self.is_current?(db, directory, opts=OPTS)
       migrator_class(directory).new(db, directory, opts).is_current?
     end
 
-    # Migrates the supplied database using the migration files in the the specified directory. Options:
-    # * :column :: The column in the :table argument storing the migration version (default: :version).
-    # * :current :: The current version of the database.  If not given, it is retrieved from the database
-    #               using the :table and :column options.
-    # * :table :: The table containing the schema version (default: :schema_info).
-    # * :target :: The target version to which to migrate.  If not given, migrates to the maximum version.
+    # Migrates the supplied database using the migration files in the specified directory. Options:
+    # :allow_missing_migration_files :: Don't raise an error if there are missing migration files.
+    # :column :: The column in the :table argument storing the migration version (default: :version).
+    # :current :: The current version of the database.  If not given, it is retrieved from the database
+    #             using the :table and :column options.
+    # :table :: The table containing the schema version (default: :schema_info).
+    # :target :: The target version to which to migrate.  If not given, migrates to the maximum version.
     #
     # Examples: 
     #   Sequel::Migrator.run(DB, "migrations")
     #   Sequel::Migrator.run(DB, "migrations", :target=>15, :current=>10)
     #   Sequel::Migrator.run(DB, "app1/migrations", :column=> :app2_version)
     #   Sequel::Migrator.run(DB, "app2/migrations", :column => :app2_version, :table=>:schema_info2)
-    def self.run(db, directory, opts={})
+    def self.run(db, directory, opts=OPTS)
       migrator_class(directory).new(db, directory, opts).run
     end
 
@@ -400,7 +405,6 @@ module Sequel
         self
       end
     end
-    private_class_method :migrator_class
     
     # The column to use to hold the migration version number for integer migrations or
     # filename for timestamp migrations (defaults to :version for integer migrations and
@@ -428,10 +432,11 @@ module Sequel
     attr_reader :target
 
     # Setup the state for the migrator
-    def initialize(db, directory, opts={})
+    def initialize(db, directory, opts=OPTS)
       raise(Error, "Must supply a valid migration path") unless File.directory?(directory)
       @db = db
       @directory = directory
+      @allow_missing_migration_files = opts[:allow_missing_migration_files]
       @files = get_migration_files
       schema, table = @db.send(:schema_and_table, opts[:table]  || self.class.const_get(:DEFAULT_SCHEMA_TABLE))
       @table = schema ? Sequel::SQL::QualifiedIdentifier.new(schema, table) : table
@@ -497,7 +502,7 @@ module Sequel
     attr_reader :migrations
 
     # Set up all state for the migrator instance
-    def initialize(db, directory, opts={})
+    def initialize(db, directory, opts=OPTS)
       super
       @target = opts[:target] || latest_migration_version
       @current = opts[:current] || current_migration_version
@@ -518,13 +523,12 @@ module Sequel
     def run
       migrations.zip(version_numbers).each do |m, v|
         t = Time.now
-        lv = up? ? v : v + 1
-        db.log_info("Begin applying migration version #{lv}, direction: #{direction}")
+        db.log_info("Begin applying migration version #{v}, direction: #{direction}")
         checked_transaction(m) do
           m.apply(db, direction)
-          set_migration_version(v)
+          set_migration_version(up? ? v : v-1)
         end
-        db.log_info("Finished applying migration version #{lv}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
+        db.log_info("Finished applying migration version #{v}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
       end
       
       target
@@ -550,7 +554,7 @@ module Sequel
         raise(Error, "Duplicate migration version: #{version}") if files[version]
         files[version] = File.join(directory, file)
       end
-      1.upto(files.length - 1){|i| raise(Error, "Missing migration version: #{i}") unless files[i]}
+      1.upto(files.length - 1){|i| raise(Error, "Missing migration version: #{i}") unless files[i]} unless @allow_missing_migration_files
       files
     end
     
@@ -560,11 +564,10 @@ module Sequel
       remove_migration_classes
 
       # load migration files
-      files[up? ? (current + 1)..target : (target + 1)..current].compact.each{|f| load(f)}
+      version_numbers.each{|n| load(files[n])}
       
       # get migration classes
-      classes = Migration.descendants
-      up? ? classes : classes.reverse
+      Migration.descendants
     end
     
     # Returns the latest version available in the specified directory.
@@ -578,9 +581,8 @@ module Sequel
     def schema_dataset
       c = column
       ds = db.from(table)
-      if !db.table_exists?(table)
-        db.create_table(table){Integer c, :default=>0, :null=>false}
-      elsif !ds.columns.include?(c)
+      db.create_table?(table){Integer c, :default=>0, :null=>false}
+      unless ds.columns.include?(c)
         db.alter_table(table){add_column c, Integer, :default=>0, :null=>false}
       end
       ds.insert(c=>0) if ds.empty?
@@ -602,7 +604,13 @@ module Sequel
     # so that each number in the array is the migration version
     # that will be in affect after the migration is run.
     def version_numbers
-      up? ? ((current+1)..target).to_a : (target..(current - 1)).to_a.reverse
+      versions = files.
+        compact.
+        map{|f| migration_version_from_file(File.basename(f))}.
+        select{|v| up? ? (v > current && v <= target) : (v <= current && v > target)}.
+        sort
+      versions.reverse! unless up?
+      versions
     end
   end
 
@@ -624,7 +632,7 @@ module Sequel
     attr_reader :migration_tuples
 
     # Set up all state for the migrator instance
-    def initialize(db, directory, opts={})
+    def initialize(db, directory, opts=OPTS)
       super
       @target = opts[:target]
       @applied_migrations = get_applied_migrations
@@ -671,7 +679,7 @@ module Sequel
     def get_applied_migrations
       am = ds.select_order_map(column)
       missing_migration_files = am - files.map{|f| File.basename(f).downcase}
-      raise(Error, "Applied migration files not in file system: #{missing_migration_files.join(', ')}") if missing_migration_files.length > 0
+      raise(Error, "Applied migration files not in file system: #{missing_migration_files.join(', ')}") if missing_migration_files.length > 0 && !@allow_missing_migration_files
       am
     end
     

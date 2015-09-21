@@ -4,7 +4,7 @@
 # expression objects.
 #
 # This extension is currently loaded by default, but that will no
-# longer be true in a future version.  In a future version, you will
+# longer be true in Sequel 4.  Starting in Sequel 4, you will
 # need to load it manually via:
 #
 #   Sequel.extension :core_extensions
@@ -48,8 +48,6 @@ class Array
   def sql_value_list
     ::Sequel::SQL::ValueList.new(self)
   end
-  
-  # Deprecated alias for sql_value_list
   alias sql_array sql_value_list
 
   # Return a <tt>Sequel::SQL::BooleanExpression</tt> created from this array, matching all of the
@@ -208,7 +206,6 @@ class Symbol
   include Sequel::SQL::StringMethods
   include Sequel::SQL::SubscriptMethods
   include Sequel::SQL::ComplexExpressionMethods
-  include Sequel::SQL::InequalityMethods if RUBY_VERSION < '1.9.0'
 
   # Returns receiver wrapped in an <tt>Sequel::SQL::Identifier</tt>.  Usually used to
   # prevent splitting the symbol.
@@ -230,5 +227,4 @@ class Symbol
   def sql_function(*args)
     Sequel::SQL::Function.new(self, *args)
   end
-  alias_method(:[], :sql_function) if RUBY_VERSION < '1.9.0'
 end

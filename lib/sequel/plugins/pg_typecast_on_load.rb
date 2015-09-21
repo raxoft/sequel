@@ -7,7 +7,7 @@ module Sequel
     # the additional support that the pg_* extensions add for advanced PostgreSQL
     # types such as arrays.
     #
-    # This plugin modifies Model#set_values to do the same conversion that the
+    # This plugin makes model loading to do the same conversion that the
     # native postgres adapter would do for all columns given.  You can either
     # specify the columns to typecast on load in the plugin call itself, or
     # afterwards using add_pg_typecast_on_load_columns:
@@ -21,8 +21,9 @@ module Sequel
     #   Album.add_pg_typecast_on_load_columns :aliases, :config
     #
     # This plugin only handles values that the adapter returns as strings.  If
-    # the adapter returns a value other than a string for a column, that value
-    # will be used directly without typecasting.
+    # the adapter returns a value other than a string, this plugin will have no
+    # effect.  You may be able to use the regular typecast_on_load plugin to
+    # handle those cases.
     module PgTypecastOnLoad
       # Call add_pg_typecast_on_load_columns on the passed column arguments.
       def self.configure(model, *columns)
@@ -41,23 +42,35 @@ module Sequel
           @pg_typecast_on_load_columns.concat(columns)
         end
 
-        # Give the subclass a copy of the columns to typecast on load.
-        def inherited(subclass)
-          super
-          subclass.instance_variable_set(:@pg_typecast_on_load_columns, pg_typecast_on_load_columns.dup)
+        def call(values)
+          super(load_typecast_pg(values))
         end
+
+        # Lookup the conversion proc for the column's oid in the Database
+        # object, and use it to convert the value.
+        def load_typecast_pg(values)
+          pg_typecast_on_load_columns.each do |c|
+            if (v = values[c]).is_a?(String) && (oid = db_schema[c][:oid]) && (pr = db.conversion_procs[oid])
+              values[c] = pr.call(v)
+            end
+          end
+          values
+        end
+
+        Plugins.inherited_instance_variables(self, :@pg_typecast_on_load_columns=>:dup)
       end
 
       module InstanceMethods
-        # Lookup the conversion proc for the column's oid in the Database
-        # object, and use it to convert the value.
-        def set_values(values)
-          model.pg_typecast_on_load_columns.each do |c|
-            if (v = values[c]).is_a?(String) && (oid = db_schema[c][:oid])
-              values[c] = db.conversion_procs[oid].call(v)
-            end
-          end
-          super
+        private
+
+        # Typecast specific columns using the conversion procs when manually refreshing.
+        def _refresh_set_values(values)
+          super(model.load_typecast_pg(values))
+        end
+
+        # Typecast specific columns using the conversion procs when refreshing after save.
+        def _save_set_values(values)
+          super(model.load_typecast_pg(values))
         end
       end
     end

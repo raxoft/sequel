@@ -3,12 +3,14 @@ Sequel.require 'adapters/utils/emulate_offset_with_row_number'
 module Sequel
   module Oracle
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       TEMPORARY = 'GLOBAL TEMPORARY '.freeze
       AUTOINCREMENT = ''.freeze
 
       attr_accessor :autosequence
 
-      def create_sequence(name, opts={})
+      def create_sequence(name, opts=OPTS)
         self << create_sequence_sql(name, opts)
       end
 
@@ -29,24 +31,61 @@ module Sequel
         :oracle
       end
 
+      def foreign_key_list(table, opts=OPTS)
+        m = output_identifier_meth
+        im = input_identifier_meth
+        schema, table = schema_and_table(table)
+        ds = metadata_dataset.
+          from(:all_cons_columns___pc, :all_constraints___p, :all_cons_columns___fc, :all_constraints___f).
+          where(:f__table_name=>im.call(table), :f__constraint_type=>'R', :p__owner=>:f__r_owner, :p__constraint_name=>:f__r_constraint_name, :pc__owner=>:p__owner, :pc__constraint_name=>:p__constraint_name, :pc__table_name=>:p__table_name, :fc__owner=>:f__owner, :fc__constraint_name=>:f__constraint_name, :fc__table_name=>:f__table_name, :fc__position=>:pc__position).
+          select(:p__table_name___table, :pc__column_name___key, :fc__column_name___column, :f__constraint_name___name).
+          order(:table, :fc__position)
+        ds = ds.where(:f__schema_name=>im.call(schema)) if schema
+
+        fks = {}
+        ds.each do |r|
+          if fk = fks[r[:name]]
+            fk[:columns] << m.call(r[:column])
+            fk[:key] << m.call(r[:key])
+          else
+            fks[r[:name]] = {:name=>m.call(r[:name]), :columns=>[m.call(r[:column])], :table=>m.call(r[:table]), :key=>[m.call(r[:key])]}
+          end
+        end
+        fks.values
+      end
+
       # Oracle namespaces indexes per table.
       def global_index_namespace?
         false
       end
 
-      def tables(opts={})
+      IGNORE_OWNERS = %w'APEX_040000 CTXSYS EXFSYS MDSYS OLAPSYS ORDDATA ORDSYS SYS SYSTEM XDB XDBMETADATA XDBPM XFILES WMSYS'
+
+      def tables(opts=OPTS)
         m = output_identifier_meth
-        metadata_dataset.from(:tab).server(opts[:server]).select(:tname).filter(:tabtype => 'TABLE').map{|r| m.call(r[:tname])}
+        metadata_dataset.from(:all_tables).
+          server(opts[:server]).
+          where(:dropped=>'NO').
+          exclude(:owner=>IGNORE_OWNERS).
+          select(:table_name).
+          map{|r| m.call(r[:table_name])}
       end
 
-      def views(opts={}) 
+      def views(opts=OPTS) 
         m = output_identifier_meth
-        metadata_dataset.from(:tab).server(opts[:server]).select(:tname).filter(:tabtype => 'VIEW').map{|r| m.call(r[:tname])}
+        metadata_dataset.from(:all_views).
+          server(opts[:server]).
+          exclude(:owner=>IGNORE_OWNERS).
+          select(:view_name).
+          map{|r| m.call(r[:view_name])}
       end 
  
       def view_exists?(name) 
         m = input_identifier_meth
-        metadata_dataset.from(:tab).filter(:tname =>m.call(name), :tabtype => 'VIEW').count > 0 
+        metadata_dataset.from(:all_views).
+          exclude(:owner=>IGNORE_OWNERS).
+          where(:view_name=>m.call(name)).
+          count > 0
       end 
 
       # Oracle supports deferrable constraints.
@@ -54,7 +93,7 @@ module Sequel
         true
       end
 
-      # DB2 supports transaction isolation levels.
+      # Oracle supports transaction isolation levels.
       def supports_transaction_isolation_levels?
         true
       end
@@ -94,7 +133,7 @@ module Sequel
         AUTOINCREMENT
       end
 
-      def create_sequence_sql(name, opts={})
+      def create_sequence_sql(name, opts=OPTS)
         "CREATE SEQUENCE #{quote_identifier(name)} start with #{opts [:start_with]||1} increment by #{opts[:increment_by]||1} nomaxvalue"
       end
 
@@ -104,7 +143,7 @@ module Sequel
         create_statements.each{|sql| execute_ddl(sql)}
       end
 
-      def create_table_sql_list(name, generator, options={})
+      def create_table_sql_list(name, generator, options=OPTS)
         statements = [create_table_sql(name, generator, options)]
         drop_seq_statement = nil
         generator.columns.each do |c|
@@ -130,7 +169,7 @@ module Sequel
         [drop_seq_statement, statements]
       end
 
-      def create_trigger_sql(table, name, definition, opts={})
+      def create_trigger_sql(table, name, definition, opts=OPTS)
         events = opts[:events] ? Array(opts[:events]) : [:insert, :update, :delete]
         sql = <<-end_sql
           CREATE#{' OR REPLACE' if opts[:replace]} TRIGGER #{quote_identifier(name)}
@@ -219,45 +258,46 @@ module Sequel
       def uses_clob_for_text?
         true
       end
+
+      # Oracle supports views with check option, but not local.
+      def view_with_check_option_support
+        true
+      end
     end
 
     module DatasetMethods
-      include EmulateOffsetWithRowNumber
-
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'with select distinct columns from join where group having compounds order lock')
       ROW_NUMBER_EXPRESSION = LiteralString.new('ROWNUM').freeze
       SPACE = Dataset::SPACE
       APOS = Dataset::APOS
       APOS_RE = Dataset::APOS_RE
       DOUBLE_APOS = Dataset::DOUBLE_APOS
       FROM = Dataset::FROM
-      BITCOMP_OPEN = "((0 - ".freeze
-      BITCOMP_CLOSE = ") - 1)".freeze
       TIMESTAMP_FORMAT = "TIMESTAMP '%Y-%m-%d %H:%M:%S%N %z'".freeze
       TIMESTAMP_OFFSET_FORMAT = "%+03i:%02i".freeze
       BOOL_FALSE = "'N'".freeze
       BOOL_TRUE = "'Y'".freeze
       HSTAR = "H*".freeze
-      DUAL = ['DUAL'.freeze].freeze
+      DUAL = ' FROM DUAL'.freeze
+      BITAND_PROC = lambda{|a, b| Sequel.lit(["CAST(BITAND(", ", ", ") AS INTEGER)"], a, b)}
+
+      include(Module.new do
+        Dataset.def_sql_method(self, :select, %w'with select distinct columns from join where group having compounds order lock')
+      end)
 
       def complex_expression_sql_append(sql, op, args)
         case op
         when :&
-          sql << complex_expression_arg_pairs(args){|a, b| "CAST(BITAND(#{literal(a)}, #{literal(b)}) AS INTEGER)"}
+          complex_expression_arg_pairs_append(sql, args, &BITAND_PROC)
         when :|
-          sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} - #{complex_expression_sql(:&, [a, b])} + #{literal(b)})"}
+          complex_expression_arg_pairs_append(sql, args){|a, b| Sequel.lit(["(", " - ", " + ", ")"], a, complex_expression_arg_pairs([a, b], &BITAND_PROC), b)}
         when :^
-          sql << complex_expression_arg_pairs(args){|*x| "(#{complex_expression_sql(:|, x)} - #{complex_expression_sql(:&, x)})"}
-        when :'B~'
-          sql << BITCOMP_OPEN
-          literal_append(sql, args.at(0))
-          sql << BITCOMP_CLOSE
-        when :<<
-          sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} * power(2, #{literal b}))"}
-        when :>>
-          sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} / power(2, #{literal b}))"}
-        when :%
-          sql << complex_expression_arg_pairs(args){|a, b| "MOD(#{literal(a)}, #{literal(b)})"}
+          complex_expression_arg_pairs_append(sql, args) do |*x|
+            s1 = complex_expression_arg_pairs(x){|a, b| Sequel.lit(["(", " - ", " + ", ")"], a, complex_expression_arg_pairs([a, b], &BITAND_PROC), b)}
+            s2 = complex_expression_arg_pairs(x, &BITAND_PROC)
+            Sequel.lit(["(", " - ", ")"], s1, s2)
+          end
+        when :%, :<<, :>>, :'B~'
+          complex_expression_emulate_append(sql, op, args)
         else
           super
         end
@@ -274,23 +314,8 @@ module Sequel
         end
       end
 
-      # Oracle treats empty strings like NULL values, and doesn't support
-      # char_length, so make char_length use length with a nonempty string.
-      # Unfortunately, as Oracle treats the empty string as NULL, there is
-      # no way to get trim to return an empty string instead of nil if
-      # the string only contains spaces.
-      def emulated_function_sql_append(sql, f)
-        case f.f
-        when :char_length
-          literal_append(sql, Sequel::SQL::Function.new(:length, Sequel.join([f.args.first, 'x'])) - 1)
-        else
-          super
-        end
-      end
-      
       # Oracle uses MINUS instead of EXCEPT, and doesn't support EXCEPT ALL
-      def except(dataset, opts={})
-        opts = {:all=>opts} unless opts.is_a?(Hash)
+      def except(dataset, opts=OPTS)
         raise(Sequel::Error, "EXCEPT ALL not supported") if opts[:all]
         compound_clone(:minus, dataset, opts)
       end
@@ -315,7 +340,23 @@ module Sequel
 
       # Handle LIMIT by using a unlimited subselect filtered with ROWNUM.
       def select_sql
-        if (limit = @opts[:limit]) && !@opts[:sql]
+        return super if @opts[:sql]
+        if o = @opts[:offset]
+          columns = clone(:append_sql=>'', :placeholder_literal_null=>true).columns
+          dsa1 = dataset_alias(1)
+          rn = row_number_column
+          limit = @opts[:limit]
+          ds = unlimited.
+            from_self(:alias=>dsa1).
+            select_append(ROW_NUMBER_EXPRESSION.as(rn)).
+            from_self(:alias=>dsa1).
+            select(*columns).
+            where(SQL::Identifier.new(rn) > o)
+          ds = ds.where(SQL::Identifier.new(rn) <= Sequel.+(o, limit)) if limit
+          sql = @opts[:append_sql] || ''
+          subselect_sql_append(sql, ds)
+          sql
+        elsif limit = @opts[:limit]
           ds = clone(:limit=>nil)
           # Lock doesn't work in subselects, so don't use a subselect when locking.
           # Don't use a subselect if custom SQL is used, as it breaks somethings.
@@ -333,6 +374,15 @@ module Sequel
         true
       end
 
+      def supports_cte?(type=:select)
+        type == :select
+      end
+
+      # Oracle does not support derived column lists
+      def supports_derived_column_lists?
+        false
+      end
+
       # Oracle supports GROUP BY CUBE
       def supports_group_cube?
         true
@@ -340,6 +390,11 @@ module Sequel
 
       # Oracle supports GROUP BY ROLLUP
       def supports_group_rollup?
+        true
+      end
+
+      # Oracle supports GROUPING SETS
+      def supports_grouping_sets?
         true
       end
 
@@ -353,6 +408,16 @@ module Sequel
         false
       end
       
+      # Oracle does not support limits in correlated subqueries.
+      def supports_limits_in_correlated_subqueries?
+        false
+      end
+    
+      # Oracle does not support offsets in correlated subqueries.
+      def supports_offsets_in_correlated_subqueries?
+        false
+      end
+
       # Oracle does not support SELECT *, column
       def supports_select_all_and_column?
         false
@@ -375,9 +440,16 @@ module Sequel
 
       private
 
+      # Allow preparing prepared statements, since determining the prepared sql to use for
+      # a prepared statement requires calling prepare on that statement.
+      def allow_preparing_prepared_statements?
+        true
+      end
+
       # Oracle doesn't support the use of AS when aliasing a dataset.  It doesn't require
       # the use of AS anywhere, so this disables it in all cases.
-      def as_sql_append(sql, aliaz)
+      def as_sql_append(sql, aliaz, column_aliases=nil)
+        raise Error, "oracle does not support derived column lists" if column_aliases
         sql << SPACE
         quote_identifier_append(sql, aliaz)
       end
@@ -387,11 +459,38 @@ module Sequel
         TIMESTAMP_FORMAT
       end
 
+      def empty_from_sql
+        DUAL
+      end
+
+      # There is no function on Microsoft SQL Server that does character length
+      # and respects trailing spaces (datalength respects trailing spaces, but
+      # counts bytes instead of characters).  Use a hack to work around the
+      # trailing spaces issue.
+      def emulate_function?(name)
+        name == :char_length
+      end
+
+      # Oracle treats empty strings like NULL values, and doesn't support
+      # char_length, so make char_length use length with a nonempty string.
+      # Unfortunately, as Oracle treats the empty string as NULL, there is
+      # no way to get trim to return an empty string instead of nil if
+      # the string only contains spaces.
+      def emulate_function_sql_append(sql, f)
+        if f.name == :char_length
+          literal_append(sql, Sequel::SQL::Function.new(:length, Sequel.join([f.args.first, 'x'])) - 1)
+        end
+      end
+      
       # If this dataset is associated with a sequence, return the most recently
       # inserted sequence value.
-      def execute_insert(sql, opts={})
-        f = @opts[:from]
-        super(sql, {:table=>(f.first if f), :sequence=>@opts[:sequence]}.merge(opts))
+      def execute_insert(sql, opts=OPTS)
+        opts = Hash[opts]
+        if f = @opts[:from]
+          opts[:table] = f.first
+        end
+        opts[:sequence] = @opts[:sequence]
+        super
       end
 
       # Use a colon for the timestamp offset, since Oracle appears to require it.
@@ -424,18 +523,14 @@ module Sequel
         BOOL_TRUE
       end
 
-      # Use the Oracle-specific SQL clauses (no limit, since it is emulated).
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
+      # Oracle can insert multiple rows using a UNION
+      def multi_insert_sql_strategy
+        :union
       end
 
-      # Modify the SQL to add the list of tables to select FROM
-      # Oracle doesn't support select without FROM clause
-      # so add the dummy DUAL table if the dataset doesn't select
-      # from a table.
-      def select_from_sql(sql)
-        sql << FROM
-        source_list_append(sql, @opts[:from] || DUAL)
+      # Oracle supports quoted function names.
+      def supports_quoted_function_names?
+        true
       end
     end
   end

@@ -8,11 +8,11 @@ module Sequel
     # ---------------------
     
     # Action methods defined by Sequel that execute code on the database.
-    ACTION_METHODS = (<<-METHS).split.map{|x| x.to_sym}
-      << [] []= all avg count columns columns! delete each
-      empty? fetch_rows first get import insert insert_multiple interval last
+    ACTION_METHODS = (<<-METHS).split.map(&:to_sym)
+      << [] all avg count columns columns! delete each
+      empty? fetch_rows first first! get import insert interval last
       map max min multi_insert paged_each range select_hash select_hash_groups select_map select_order_map
-      set single_record single_value sum to_csv to_hash to_hash_groups truncate update
+      single_record single_record! single_value single_value! sum to_hash to_hash_groups truncate update
     METHS
 
     # Inserts the given argument into the database.  Returns self so it
@@ -33,15 +33,6 @@ module Sequel
       first(*conditions)
     end
 
-    # Update all records matching the conditions with the values specified.
-    # Returns the number of rows affected.
-    #
-    #   DB[:table][:id=>1] = {:id=>2} # UPDATE table SET id = 2 WHERE id = 1
-    #   # => 1 # number of rows affected
-    def []=(conditions, values)
-      filter(conditions).update(values)
-    end
-
     # Returns an array with all records in the dataset. If a block is given,
     # the array is iterated over after all items have been loaded.
     #
@@ -51,11 +42,7 @@ module Sequel
     #   # Iterate over all rows in the table
     #   DB[:table].all{|row| p row}
     def all(&block)
-      a = []
-      each{|r| a << r}
-      post_load(a)
-      a.each(&block) if block
-      a
+      _all(block){|a| each{|r| a << r}}
     end
     
     # Returns the average value for the given column/expression.
@@ -66,7 +53,7 @@ module Sequel
     #   DB[:table].avg{function(column)} # SELECT avg(function(column)) FROM table LIMIT 1
     #   # => 1
     def avg(column=Sequel.virtual_row(&Proc.new))
-      aggregate_dataset.get{avg(column)}
+      aggregate_dataset.get{avg(column).as(:avg)}
     end
   
     # Returns the columns in the result set in order as an array of symbols.
@@ -101,24 +88,24 @@ module Sequel
     # treated as a virtual row, and the result is used as the argument to
     # count.
     #
-    #   DB[:table].count # SELECT COUNT(*) AS count FROM table LIMIT 1
+    #   DB[:table].count # SELECT count(*) AS count FROM table LIMIT 1
     #   # => 3
-    #   DB[:table].count(:column) # SELECT COUNT(column) AS count FROM table LIMIT 1
+    #   DB[:table].count(:column) # SELECT count(column) AS count FROM table LIMIT 1
     #   # => 2
-    #   DB[:table].count{foo(column)} # SELECT COUNT(foo(column)) AS count FROM table LIMIT 1
+    #   DB[:table].count{foo(column)} # SELECT count(foo(column)) AS count FROM table LIMIT 1
     #   # => 1
     def count(arg=(no_arg=true), &block)
       if no_arg
         if block
           arg = Sequel.virtual_row(&block)
-          aggregate_dataset.get{COUNT(arg).as(count)}
+          aggregate_dataset.get{count(arg).as(:count)}
         else
-          aggregate_dataset.get{COUNT(:*){}.as(count)}.to_i
+          aggregate_dataset.get{count{}.*.as(:count)}.to_i
         end
       elsif block
         raise Error, 'cannot provide both argument and block to Dataset#count'
       else
-        aggregate_dataset.get{COUNT(arg).as(count)}
+        aggregate_dataset.get{count(arg).as(:count)}
       end
     end
     
@@ -144,11 +131,9 @@ module Sequel
     # Note that this method is not safe to use on many adapters if you are
     # running additional queries inside the provided block.  If you are
     # running queries inside the block, you should use +all+ instead of +each+
-    # for the outer queries, or use a separate thread or shard inside +each+:
+    # for the outer queries, or use a separate thread or shard inside +each+.
     def each
-      if @opts[:graph]
-        graph_each{|r| yield r}
-      elsif row_proc = @row_proc
+      if row_proc = @row_proc
         fetch_rows(select_sql){|r| yield row_proc.call(r)}
       else
         fetch_rows(select_sql){|r| yield r}
@@ -161,23 +146,21 @@ module Sequel
     #   DB[:table].empty? # SELECT 1 AS one FROM table LIMIT 1
     #   # => false
     def empty?
-      get(Sequel::SQL::AliasedExpression.new(1, :one)).nil?
+      ds = @opts[:order] ? unordered : self
+      ds.get(Sequel::SQL::AliasedExpression.new(1, :one)).nil?
     end
 
-    # Executes a select query and fetches records, yielding each record to the
-    # supplied block.  The yielded records should be hashes with symbol keys.
-    # This method should probably should not be called by user code, use +each+
-    # instead.
-    def fetch_rows(sql)
-      raise NotImplemented, NOTIMPL_MSG
-    end
-    
     # If a integer argument is given, it is interpreted as a limit, and then returns all 
     # matching records up to that limit.  If no argument is passed,
     # it returns the first matching record.  If any other type of
     # argument(s) is passed, it is given to filter and the
-    # first matching record is returned. If a block is given, it is used
-    # to filter the dataset before returning anything.  Examples:
+    # first matching record is returned.  If a block is given, it is used
+    # to filter the dataset before returning anything.
+    #
+    # If there are no records in the dataset, returns nil (or an empty
+    # array if an integer argument is given).
+    #
+    # Examples:
     # 
     #   DB[:table].first # SELECT * FROM table LIMIT 1
     #   # => {:id=>7}
@@ -209,12 +192,18 @@ module Sequel
         ds.single_record
       else
         args = (args.size == 1) ? args.first : args
-        if Integer === args
+        if args.is_a?(Integer)
           ds.limit(args).all
         else
           ds.filter(args).single_record
         end
       end
+    end
+
+    # Calls first.  If first returns nil (signaling that no
+    # row matches), raise a Sequel::NoMatchingRow exception.
+    def first!(*args, &block)
+      first(*args, &block) || raise(Sequel::NoMatchingRow.new(self))
     end
 
     # Return the column value for the first matching record in the dataset.
@@ -223,7 +212,7 @@ module Sequel
     #   DB[:table].get(:id) # SELECT id FROM table LIMIT 1
     #   # => 3
     #
-    #   ds.get{sum(id)} # SELECT sum(id) FROM table LIMIT 1
+    #   ds.get{sum(id)} # SELECT sum(id) AS v FROM table LIMIT 1
     #   # => 6
     #
     # You can pass an array of arguments to return multiple arguments,
@@ -246,12 +235,14 @@ module Sequel
         ds = if column.is_a?(Array)
           ds.select(*column)
         else
-          ds.select(column)
+          ds.select(auto_alias_expression(column))
         end
       end
 
       if column.is_a?(Array)
-        ds.single_record.values_at(*column.map{|c| hash_key_symbol(c)})
+       if r = ds.single_record
+         r.values_at(*hash_key_symbols(column))
+       end
       else
         ds.single_value
       end
@@ -277,17 +268,19 @@ module Sequel
     # :commit_every :: Open a new transaction for every given number of records.
     #                  For example, if you provide a value of 50, will commit
     #                  after every 50 records.
+    # :return :: When this is set to :primary_key, returns an array of
+    #            autoincremented primary key values for the rows inserted.
     # :server :: Set the server/shard to use for the transaction and insert
     #            queries.
     # :slice :: Same as :commit_every, :commit_every takes precedence.
-    def import(columns, values, opts={})
+    def import(columns, values, opts=OPTS)
       return @db.transaction{insert(columns, values)} if values.is_a?(Dataset)
 
       return if values.empty?
       raise(Error, IMPORT_ERROR_MSG) if columns.empty?
       ds = opts[:server] ? server(opts[:server]) : self
       
-      if slice_size = opts[:commit_every] || opts[:slice]
+      if slice_size = opts.fetch(:commit_every, opts.fetch(:slice, default_import_slice))
         offset = 0
         rows = []
         while offset < values.length
@@ -344,29 +337,6 @@ module Sequel
       end
     end
     
-    # Inserts multiple values. If a block is given it is invoked for each
-    # item in the given array before inserting it.  See +multi_insert+ as
-    # a possibly faster version that may be able to insert multiple
-    # records in one SQL statement (if supported by the database).
-    # Returns an array of primary keys of inserted rows.
-    #
-    #   DB[:table].insert_multiple([{:x=>1}, {:x=>2}])
-    #   # => [4, 5]
-    #   # INSERT INTO table (x) VALUES (1)
-    #   # INSERT INTO table (x) VALUES (2)
-    #
-    #   DB[:table].insert_multiple([{:x=>1}, {:x=>2}]){|row| row[:y] = row[:x] * 2; row }
-    #   # => [6, 7]
-    #   # INSERT INTO table (x, y) VALUES (1, 2)
-    #   # INSERT INTO table (x, y) VALUES (2, 4)
-    def insert_multiple(array, &block)
-      if block
-        array.map{|i| insert(block.call(i))}
-      else
-        array.map{|i| insert(i)}
-      end
-    end
-    
     # Returns the interval between minimum and maximum values for the given 
     # column/expression. Uses a virtual row block if no argument is given.
     #
@@ -375,7 +345,7 @@ module Sequel
     #   DB[:table].interval{function(column)} # SELECT (max(function(column)) - min(function(column))) FROM table LIMIT 1
     #   # => 7
     def interval(column=Sequel.virtual_row(&Proc.new))
-      aggregate_dataset.get{max(column) - min(column)}
+      aggregate_dataset.get{(max(column) - min(column)).as(:interval)}
     end
 
     # Reverses the order and then runs #first with the given arguments and block.  Note that this
@@ -429,7 +399,7 @@ module Sequel
     #   DB[:table].max{function(column)} # SELECT max(function(column)) FROM table LIMIT 1
     #   # => 7
     def max(column=Sequel.virtual_row(&Proc.new))
-      aggregate_dataset.get{max(column)}
+      aggregate_dataset.get{max(column).as(:max)}
     end
 
     # Returns the minimum value for the given column/expression.
@@ -440,7 +410,7 @@ module Sequel
     #   DB[:table].min{function(column)} # SELECT min(function(column)) FROM table LIMIT 1
     #   # => 0
     def min(column=Sequel.virtual_row(&Proc.new))
-      aggregate_dataset.get{min(column)}
+      aggregate_dataset.get{min(column).as(:min)}
     end
 
     # This is a front end for import that allows you to submit an array of
@@ -455,55 +425,117 @@ module Sequel
     # values.
     #
     # This respects the same options as #import.
-    def multi_insert(hashes, opts={})
+    def multi_insert(hashes, opts=OPTS)
       return if hashes.empty?
       columns = hashes.first.keys
       import(columns, hashes.map{|h| columns.map{|c| h[c]}}, opts)
     end
 
-    # Yields each row in the dataset, but interally uses multiple queries as needed with
-    # limit and offset to process the entire result set without keeping all
-    # rows in the dataset in memory, even if the underlying driver buffers all
-    # query results in memory.
+    # Yields each row in the dataset, but interally uses multiple queries as needed to
+    # process the entire result set without keeping all rows in the dataset in memory,
+    # even if the underlying driver buffers all query results in memory.
     #
     # Because this uses multiple queries internally, in order to remain consistent,
-    # it also uses a transaction internally.  Additionally, to make sure that all rows
-    # in the dataset are yielded and none are yielded twice, the dataset must have an
-    # unambiguous order.  Sequel requires that datasets using this method have an
-    # order, but it cannot ensure that the order is unambiguous.
+    # it also uses a transaction internally.  Additionally, to work correctly, the dataset
+    # must have unambiguous order.  Using an ambiguous order can result in an infinite loop,
+    # as well as subtler bugs such as yielding duplicate rows or rows being skipped.
+    #
+    # Sequel checks that the datasets using this method have an order, but it cannot
+    # ensure that the order is unambiguous.
     #
     # Options:
     # :rows_per_fetch :: The number of rows to fetch per query.  Defaults to 1000.
-    def paged_each(opts={})
+    # :strategy :: The strategy to use for paging of results.  By default this is :offset,
+    #              for using an approach with a limit and offset for every page.  This can
+    #              be set to :filter, which uses a limit and a filter that excludes
+    #              rows from previous pages.  In order for this strategy to work, you must be
+    #              selecting the columns you are ordering by, and none of the columns can contain
+    #              NULLs.  Note that some Sequel adapters have optimized implementations that will
+    #              use cursors or streaming regardless of the :strategy option used.
+    # :filter_values :: If the :strategy=>:filter option is used, this option should be a proc
+    #                   that accepts the last retreived row for the previous page and an array of
+    #                   ORDER BY expressions, and returns an array of values relating to those
+    #                   expressions for the last retrieved row.  You will need to use this option
+    #                   if your ORDER BY expressions are not simple columns, if they contain
+    #                   qualified identifiers that would be ambiguous unqualified, if they contain
+    #                   any identifiers that are aliased in SELECT, and potentially other cases.
+    #
+    # Examples:
+    #
+    #   DB[:table].order(:id).paged_each{|row| }
+    #   # SELECT * FROM table ORDER BY id LIMIT 1000
+    #   # SELECT * FROM table ORDER BY id LIMIT 1000 OFFSET 1000
+    #   # ...
+    #
+    #   DB[:table].order(:id).paged_each(:rows_per_fetch=>100){|row| }
+    #   # SELECT * FROM table ORDER BY id LIMIT 100
+    #   # SELECT * FROM table ORDER BY id LIMIT 100 OFFSET 100
+    #   # ...
+    #
+    #   DB[:table].order(:id).paged_each(:strategy=>:filter){|row| }
+    #   # SELECT * FROM table ORDER BY id LIMIT 1000
+    #   # SELECT * FROM table WHERE id > 1001 ORDER BY id LIMIT 1000
+    #   # ...
+    #
+    #   DB[:table].order(:table__id).paged_each(:strategy=>:filter,
+    #     :filter_values=>proc{|row, exprs| [row[:id]]}){|row| }
+    #   # SELECT * FROM table ORDER BY id LIMIT 1000
+    #   # SELECT * FROM table WHERE id > 1001 ORDER BY id LIMIT 1000
+    #   # ...
+    def paged_each(opts=OPTS)
       unless @opts[:order]
         raise Sequel::Error, "Dataset#paged_each requires the dataset be ordered"
       end
+      unless block_given?
+        return enum_for(:paged_each, opts)
+      end
 
       total_limit = @opts[:limit]
-      offset = @opts[:offset] || 0
-
+      offset = @opts[:offset]
       if server = @opts[:server]
-        opts = opts.merge(:server=>server)
+        opts = Hash[opts]
+        opts[:server] = server
       end
 
       rows_per_fetch = opts[:rows_per_fetch] || 1000
-      num_rows_yielded = rows_per_fetch
-      total_rows = 0
+      strategy = if offset || total_limit
+        :offset
+      else
+        opts[:strategy] || :offset
+      end
 
       db.transaction(opts) do
-        while num_rows_yielded == rows_per_fetch && (total_limit.nil? || total_rows < total_limit)
-          if total_limit && total_rows + rows_per_fetch > total_limit
-            rows_per_fetch = total_limit - total_rows
+        case strategy
+        when :filter
+          filter_values = opts[:filter_values] || proc{|row, exprs| exprs.map{|e| row[hash_key_symbol(e)]}}
+          base_ds = ds = limit(rows_per_fetch)
+          while ds
+            last_row = nil
+            ds.each do |row|
+              last_row = row
+              yield row
+            end
+            ds = (base_ds.where(ignore_values_preceding(last_row, &filter_values)) if last_row)
           end
+        else
+          offset ||= 0
+          num_rows_yielded = rows_per_fetch
+          total_rows = 0
 
-          num_rows_yielded = 0
-          limit(rows_per_fetch, offset).each do |row|
-            num_rows_yielded += 1
-            total_rows += 1 if total_limit
-            yield row
+          while num_rows_yielded == rows_per_fetch && (total_limit.nil? || total_rows < total_limit)
+            if total_limit && total_rows + rows_per_fetch > total_limit
+              rows_per_fetch = total_limit - total_rows
+            end
+
+            num_rows_yielded = 0
+            limit(rows_per_fetch, offset).each do |row|
+              num_rows_yielded += 1
+              total_rows += 1 if total_limit
+              yield row
+            end
+
+            offset += rows_per_fetch
           end
-
-          offset += rows_per_fetch
         end
       end
 
@@ -545,13 +577,13 @@ module Sequel
     # Returns a hash with key_column values as keys and an array of value_column values.
     # Similar to to_hash_groups, but only selects the columns given.
     #
-    #   DB[:table].select_hash(:name, :id) # SELECT id, name FROM table
+    #   DB[:table].select_hash_groups(:name, :id) # SELECT id, name FROM table
     #   # => {'a'=>[1, 4, ...], 'b'=>[2, ...], ...}
     #
     # You can also provide an array of column names for either the key_column,
     # the value column, or both:
     #
-    #   DB[:table].select_hash([:first, :middle], [:last, :id]) # SELECT * FROM table
+    #   DB[:table].select_hash_groups([:first, :middle], [:last, :id]) # SELECT * FROM table
     #   # {['a', 'b']=>[['c', 1], ['d', 2], ...], ...}
     #
     # When using this method, you must be sure that each expression has an alias
@@ -605,27 +637,50 @@ module Sequel
       _select_map(column, true, &block)
     end
 
-    # Alias for update, but not aliased directly so subclasses
-    # don't have to override both methods.
-    def set(*args)
-      update(*args)
-    end
-    
-    # Returns the first record in the dataset, or nil if the dataset
-    # has no records. Users should probably use +first+ instead of
-    # this method.
+    # Limits the dataset to one record, and returns the first record in the dataset,
+    # or nil if the dataset has no records. Users should probably use +first+ instead of
+    # this method. Example:
+    #
+    #   DB[:test].single_record # SELECT * FROM test LIMIT 1
+    #   # => {:column_name=>'value'}
     def single_record
-      clone(:limit=>1).each{|r| return r}
-      nil
+      clone(:limit=>1).single_record!
+    end
+
+    # Returns the first record in dataset, without limiting the dataset. Returns nil if
+    # the dataset has no records. Users should probably use +first+ instead of this method.
+    # This should only be used if you know the dataset is already limited to a single record.
+    # This method may be desirable to use for performance reasons, as it does not clone the
+    # receiver. Example:
+    #
+    #   DB[:test].single_record! # SELECT * FROM test
+    #   # => {:column_name=>'value'}
+    def single_record!
+      with_sql_first(select_sql)
     end
 
     # Returns the first value of the first record in the dataset.
     # Returns nil if dataset is empty.  Users should generally use
-    # +get+ instead of this method.
+    # +get+ instead of this method. Example:
+    #
+    #   DB[:test].single_value # SELECT * FROM test LIMIT 1
+    #   # => 'value'
     def single_value
-      if r = naked.ungraphed.single_record
-        r.values.first
+      if r = ungraphed.naked.single_record
+        r.each{|_, v| return v}
       end
+    end
+
+    # Returns the first value of the first record in the dataset, without limiting the dataset.
+    # Returns nil if the dataset is empty. Users should generally use +get+ instead of this
+    # method.  Should not be used on graphed datasets or datasets that have row_procs that
+    # don't return hashes.  This method may be desirable to use for performance reasons, as
+    # it does not clone the receiver.
+    #
+    #   DB[:test].single_value! # SELECT * FROM test
+    #   # => 'value'
+    def single_value!
+      with_sql_single_value(select_sql)
     end
     
     # Returns the sum for the given column/expression.
@@ -636,31 +691,9 @@ module Sequel
     #   DB[:table].sum{function(column)} # SELECT sum(function(column)) FROM table LIMIT 1
     #   # => 10
     def sum(column=Sequel.virtual_row(&Proc.new))
-      aggregate_dataset.get{sum(column)}
+      aggregate_dataset.get{sum(column).as(:sum)}
     end
 
-    # Returns a string in CSV format containing the dataset records. By 
-    # default the CSV representation includes the column titles in the
-    # first line. You can turn that off by passing false as the 
-    # include_column_titles argument.
-    #
-    # This does not use a CSV library or handle quoting of values in
-    # any way.  If any values in any of the rows could include commas or line
-    # endings, you shouldn't use this.
-    #
-    #   puts DB[:table].to_csv # SELECT * FROM table
-    #   # id,name
-    #   # 1,Jim
-    #   # 2,Bob
-    def to_csv(include_column_titles = true)
-      n = naked
-      cols = n.columns
-      csv = ''
-      csv << "#{cols.join(COMMA_SEPARATOR)}\r\n" if include_column_titles
-      n.each{|r| csv << "#{cols.collect{|c| r[c]}.join(COMMA_SEPARATOR)}\r\n"}
-      csv
-    end
-    
     # Returns a hash with one column used as key and another used as value.
     # If rows have duplicate values for the key column, the latter row(s)
     # will overwrite the value of the previous row(s). If the value_column
@@ -698,7 +731,7 @@ module Sequel
           end
         end
       elsif key_column.is_a?(Array)
-        each{|r| h[r.values_at(*key_column)] = r}
+        each{|r| h[key_column.map{|k| r[k]}] = r}
       else
         each{|r| h[r[key_column]] = r}
       end
@@ -709,19 +742,19 @@ module Sequel
     # array of column values. If the value_column is not given or nil, uses
     # the entire hash as the value.
     #
-    #   DB[:table].to_hash(:name, :id) # SELECT * FROM table
+    #   DB[:table].to_hash_groups(:name, :id) # SELECT * FROM table
     #   # {'Jim'=>[1, 4, 16, ...], 'Bob'=>[2], ...}
     #
-    #   DB[:table].to_hash(:name) # SELECT * FROM table
+    #   DB[:table].to_hash_groups(:name) # SELECT * FROM table
     #   # {'Jim'=>[{:id=>1, :name=>'Jim'}, {:id=>4, :name=>'Jim'}, ...], 'Bob'=>[{:id=>2, :name=>'Bob'}], ...}
     #
     # You can also provide an array of column names for either the key_column,
     # the value column, or both:
     #
-    #   DB[:table].to_hash([:first, :middle], [:last, :id]) # SELECT * FROM table
+    #   DB[:table].to_hash_groups([:first, :middle], [:last, :id]) # SELECT * FROM table
     #   # {['Jim', 'Bob']=>[['Smith', 1], ['Jackson', 4], ...], ...}
     #
-    #   DB[:table].to_hash([:first, :middle]) # SELECT * FROM table
+    #   DB[:table].to_hash_groups([:first, :middle]) # SELECT * FROM table
     #   # {['Jim', 'Bob']=>[{:id=>1, :first=>'Jim', :middle=>'Bob', :last=>'Smith'}, ...], ...}
     def to_hash_groups(key_column, value_column = nil)
       h = {}
@@ -741,7 +774,7 @@ module Sequel
           end
         end
       elsif key_column.is_a?(Array)
-        each{|r| (h[r.values_at(*key_column)] ||= []) << r}
+        each{|r| (h[key_column.map{|k| r[k]}] ||= []) << r}
       else
         each{|r| (h[r[key_column]] ||= []) << r}
       end
@@ -764,9 +797,9 @@ module Sequel
     #   DB[:table].update(:x=>nil) # UPDATE table SET x = NULL
     #   # => 10
     #
-    #   DB[:table].update(:x=>:x+1, :y=>0) # UPDATE table SET x = (x + 1), y = 0
+    #   DB[:table].update(:x=>Sequel.expr(:x)+1, :y=>0) # UPDATE table SET x = (x + 1), y = 0
     #   # => 10
-    def update(values={}, &block)
+    def update(values=OPTS, &block)
       sql = update_sql(values)
       if uses_returning?(:update)
         returning_fetch_rows(sql, &block)
@@ -775,11 +808,53 @@ module Sequel
       end
     end
 
+    # Run the given SQL and return an array of all rows.  If a block is given,
+    # each row is yielded to the block after all rows are loaded. See with_sql_each.
+    def with_sql_all(sql, &block)
+      _all(block){|a| with_sql_each(sql){|r| a << r}}
+    end
+
     # Execute the given SQL and return the number of rows deleted.  This exists
     # solely as an optimization, replacing with_sql(sql).delete.  It's significantly
     # faster as it does not require cloning the current dataset.
     def with_sql_delete(sql)
       execute_dui(sql)
+    end
+    alias with_sql_update with_sql_delete
+
+    # Run the given SQL and yield each returned row to the block.
+    #
+    # This method should not be called on a shared dataset if the columns selected
+    # in the given SQL do not match the columns in the receiver.
+    def with_sql_each(sql)
+      if row_proc = @row_proc
+        fetch_rows(sql){|r| yield row_proc.call(r)}
+      else
+        fetch_rows(sql){|r| yield r}
+      end
+      self
+    end
+    
+    # Run the given SQL and return the first row, or nil if no rows were returned.
+    # See with_sql_each.
+    def with_sql_first(sql)
+      with_sql_each(sql){|r| return r}
+      nil
+    end
+
+    # Run the given SQL and return the first value in the first row, or nil if no
+    # rows were returned.  For this to make sense, the SQL given should select
+    # only a single value.  See with_sql_each.
+    def with_sql_single_value(sql)
+      if r = with_sql_first(sql)
+        r.each{|_, v| return v}
+      end
+    end
+
+    # Execute the given SQL and (on most databases) return the primary key of the
+    # inserted row.
+    def with_sql_insert(sql)
+      execute_insert(sql)
     end
 
     protected
@@ -788,7 +863,7 @@ module Sequel
     # separate insert commands for each row.  Otherwise, call #multi_insert_sql
     # and execute each statement it gives separately.
     def _import(columns, values, opts)
-      trans_opts = opts.merge(:server=>@opts[:server])
+      trans_opts = Hash[opts].merge!(:server=>@opts[:server])
       if opts[:return] == :primary_key
         @db.transaction(trans_opts){values.map{|v| insert(columns, v)}}
       else
@@ -809,84 +884,154 @@ module Sequel
   
     private
     
+    # Internals of all and with_sql_all
+    def _all(block)
+      a = []
+      yield a
+      post_load(a)
+      a.each(&block) if block
+      a
+    end
+    
     # Internals of +select_hash+ and +select_hash_groups+
     def _select_hash(meth, key_column, value_column)
-      if key_column.is_a?(Array)
-        if value_column.is_a?(Array)
-          select(*(key_column + value_column)).send(meth, key_column.map{|c| hash_key_symbol(c)}, value_column.map{|c| hash_key_symbol(c)})
-        else
-          select(*(key_column + [value_column])).send(meth, key_column.map{|c| hash_key_symbol(c)}, hash_key_symbol(value_column))
-        end
-      elsif value_column.is_a?(Array)
-        select(key_column, *value_column).send(meth, hash_key_symbol(key_column), value_column.map{|c| hash_key_symbol(c)})
-      else
-        select(key_column, value_column).send(meth, hash_key_symbol(key_column), hash_key_symbol(value_column))
-      end
+      select(*(key_column.is_a?(Array) ? key_column : [key_column]) + (value_column.is_a?(Array) ? value_column : [value_column])).
+        send(meth, hash_key_symbols(key_column), hash_key_symbols(value_column))
     end
     
     # Internals of +select_map+ and +select_order_map+
     def _select_map(column, order, &block)
-      ds = naked.ungraphed
+      ds = ungraphed.naked
       columns = Array(column)
       virtual_row_columns(columns, block)
       select_cols = order ? columns.map{|c| c.is_a?(SQL::OrderedExpression) ? c.expression : c} : columns
-      ds = ds.select(*select_cols)
       ds = ds.order(*columns.map{|c| unaliased_identifier(c)}) if order
       if column.is_a?(Array) || (columns.length > 1)
-        ds._select_map_multiple(select_cols.map{|c| hash_key_symbol(c)})
+        ds.select(*select_cols)._select_map_multiple(hash_key_symbols(select_cols))
       else
-        ds._select_map_single
+        ds.select(auto_alias_expression(select_cols.first))._select_map_single
       end
+    end
+
+    # Automatically alias the given expression if it does not have an identifiable alias.
+    def auto_alias_expression(v)
+      case v
+      when LiteralString, Symbol, SQL::Identifier, SQL::QualifiedIdentifier, SQL::AliasedExpression
+        v
+      else
+        SQL::AliasedExpression.new(v, :v)
+      end
+    end
+
+    # The default number of rows that can be inserted in a single INSERT statement via import.
+    # The default is for no limit.
+    def default_import_slice
+      nil
     end
 
     # Set the server to use to :default unless it is already set in the passed opts
     def default_server_opts(opts)
-      {:server=>@opts[:server] || :default}.merge(opts)
+      if @db.sharded?
+        opts = Hash[opts]
+        opts[:server] = @opts[:server] || :default
+      end
+      opts
     end
 
     # Execute the given select SQL on the database using execute. Use the
     # :read_only server unless a specific server is set.
-    def execute(sql, opts={}, &block)
-      @db.execute(sql, {:server=>@opts[:server] || :read_only}.merge(opts), &block)
+    def execute(sql, opts=OPTS, &block)
+      db = @db
+      if db.sharded?
+        opts = Hash[opts]
+        opts[:server] = @opts[:server] || (@opts[:lock] ? :default : :read_only)
+        opts
+      end
+      db.execute(sql, opts, &block)
     end
     
     # Execute the given SQL on the database using execute_ddl.
-    def execute_ddl(sql, opts={}, &block)
+    def execute_ddl(sql, opts=OPTS, &block)
       @db.execute_ddl(sql, default_server_opts(opts), &block)
       nil
     end
     
     # Execute the given SQL on the database using execute_dui.
-    def execute_dui(sql, opts={}, &block)
+    def execute_dui(sql, opts=OPTS, &block)
       @db.execute_dui(sql, default_server_opts(opts), &block)
     end
     
     # Execute the given SQL on the database using execute_insert.
-    def execute_insert(sql, opts={}, &block)
+    def execute_insert(sql, opts=OPTS, &block)
       @db.execute_insert(sql, default_server_opts(opts), &block)
     end
     
     # Return a plain symbol given a potentially qualified or aliased symbol,
     # specifying the symbol that is likely to be used as the hash key
-    # for the column when records are returned.
-    def hash_key_symbol(s)
+    # for the column when records are returned.  Return nil if no hash key
+    # can be determined
+    def _hash_key_symbol(s, recursing=false)
       case s
       when Symbol
         _, c, a = split_symbol(s)
         (a || c).to_sym
       when SQL::Identifier, SQL::Wrapper
-        hash_key_symbol(s.value)
+        _hash_key_symbol(s.value, true)
       when SQL::QualifiedIdentifier
-        hash_key_symbol(s.column)
+        _hash_key_symbol(s.column, true)
       when SQL::AliasedExpression
-        hash_key_symbol(s.aliaz)
+        _hash_key_symbol(s.alias, true)
       when String
-        s.to_sym
-      else
-        raise(Error, "#{s.inspect} is not supported, should be a Symbol, String, SQL::Identifier, SQL::QualifiedIdentifier, or SQL::AliasedExpression") 
+        s.to_sym if recursing
       end
     end
+
+    # Return a plain symbol given a potentially qualified or aliased symbol,
+    # specifying the symbol that is likely to be used as the hash key
+    # for the column when records are returned.  Raise Error if the hash key
+    # symbol cannot be returned.
+    def hash_key_symbol(s)
+      if v = _hash_key_symbol(s)
+        v
+      else
+        raise(Error, "#{s.inspect} is not supported, should be a Symbol, SQL::Identifier, SQL::QualifiedIdentifier, or SQL::AliasedExpression")
+      end
+    end
+
+    # If s is an array, return an array with the given hash key symbols.
+    # Otherwise, return a hash key symbol for the given expression 
+    # If a hash key symbol cannot be determined, raise an error.
+    def hash_key_symbols(s)
+      s.is_a?(Array) ? s.map{|c| hash_key_symbol(c)} : hash_key_symbol(s)
+    end
     
+    # Returns an expression that will ignore values preceding the given row, using the
+    # receiver's current order. This yields the row and the array of order expressions
+    # to the block, which should return an array of values to use.
+    def ignore_values_preceding(row)
+      @opts[:order].map{|v| v.is_a?(SQL::OrderedExpression) ? v.expression : v}
+
+      order_exprs = @opts[:order].map do |v|
+        if v.is_a?(SQL::OrderedExpression)
+          descending = v.descending
+          v = v.expression
+        else
+          descending = false
+        end
+        [v, descending]
+      end
+
+      row_values = yield(row, order_exprs.map(&:first))
+
+      last_expr = []
+      cond = order_exprs.zip(row_values).map do |(v, descending), value|
+        expr =  last_expr + [SQL::BooleanExpression.new(descending ? :< : :>, v, value)]
+        last_expr += [SQL::BooleanExpression.new(:'=', v, value)]
+        Sequel.&(*expr)
+      end
+      Sequel.|(*cond)
+    end
+
     # Modify the identifier returned from the database based on the
     # identifier_output_method.
     def output_identifier(v)
@@ -921,8 +1066,12 @@ module Sequel
     def unaliased_identifier(c)
       case c
       when Symbol
-        c_table, column, _ = split_symbol(c)
-        c_table ? SQL::QualifiedIdentifier.new(c_table, column.to_sym) : column.to_sym
+        table, column, aliaz = split_symbol(c)
+        if aliaz
+          table ? SQL::QualifiedIdentifier.new(table, column) : Sequel.identifier(column)
+        else
+          c
+        end
       when SQL::AliasedExpression
         c.expression
       when SQL::OrderedExpression

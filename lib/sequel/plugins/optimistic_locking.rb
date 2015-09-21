@@ -1,6 +1,4 @@
 module Sequel
-  tsk_require 'sequel/plugins/instance_filters'
-  
   module Plugins
     # This plugin implements a simple database-independent locking mechanism
     # to ensure that concurrent updates do not override changes. This is
@@ -21,16 +19,16 @@ module Sequel
     # This plugin relies on the instance_filters plugin.
     module OptimisticLocking
       # Exception class raised when trying to update or destroy a stale object.
-      Error = InstanceFilters::Error
+      Error = Sequel::NoExistingObject
       
       # Load the instance_filters plugin into the model.
-      def self.apply(model, opts={})
+      def self.apply(model, opts=OPTS)
         model.plugin :instance_filters
       end
 
       # Set the lock_column to the :lock_column option, or :lock_version if
       # that option is not given.
-      def self.configure(model, opts={})
+      def self.configure(model, opts=OPTS)
         model.lock_column = opts[:lock_column] || :lock_version
       end
       
@@ -38,11 +36,7 @@ module Sequel
         # The column holding the version of the lock
         attr_accessor :lock_column
         
-        # Copy the lock_column value into the subclass
-        def inherited(subclass)
-          super
-          subclass.lock_column = lock_column
-        end
+        Plugins.inherited_instance_variables(self, :@lock_column=>nil)
       end
     
       module InstanceMethods
@@ -63,7 +57,7 @@ module Sequel
         # Add the lock column instance filter to the object.
         def lock_column_instance_filter
           lc = model.lock_column
-          instance_filter(lc=>send(lc))
+          instance_filter(lc=>get_column_value(lc))
         end
 
         # Clear the instance filters when refreshing, so that attempting to
@@ -78,10 +72,10 @@ module Sequel
         # lock version.
         def _update_columns(columns)
           lc = model.lock_column
-          lcv = send(lc)
+          lcv = get_column_value(lc)
           columns[lc] = lcv + 1
           super
-          send("#{lc}=", lcv + 1)
+          set_column_value("#{lc}=", lcv + 1)
         end
       end
     end

@@ -21,7 +21,6 @@ module Sequel
       # Setup the validations hash for the given model.
       def self.apply(model)
         model.class_eval do
-          @validation_mutex = Mutex.new
           @validations = {}
           @validation_reflections = {}
         end
@@ -63,27 +62,21 @@ module Sequel
           !validations.empty?
         end
 
-        # Setup the validations and validation_reflections hash in the subclass.
-        def inherited(subclass)
-          vr = @validation_reflections
-          subclass.class_eval do
-            @validation_mutex = Mutex.new
-            @validations = {}
-            h = {}
-            vr.each{|k,v| h[k] = v.dup}
-            @validation_reflections = h
-          end
-          super
-        end
-    
+        Plugins.inherited_instance_variables(self, :@validations=>:hash_dup, :@validation_reflections=>:hash_dup)
+
         # Instructs the model to skip validations defined in superclasses
         def skip_superclass_validations
+          superclass.validations.each do |att, procs|
+            if @validations[att]
+              @validations[att] -= procs
+            end
+          end
           @skip_superclass_validations = true
         end
         
         # Instructs the model to skip validations defined in superclasses
         def skip_superclass_validations?
-          defined?(@skip_superclass_validations) && @skip_superclass_validations
+          @skip_superclass_validations
         end
 
         # Defines validations by converting a longhand block into a series of 
@@ -107,13 +100,12 @@ module Sequel
     
         # Validates the given instance.
         def validate(o)
-          superclass.validate(o) if superclass.respond_to?(:validate) && !skip_superclass_validations?
           validations.each do |att, procs|
             v = case att
             when Array
-              att.collect{|a| o.send(a)}
+              att.collect{|a| o.get_column_value(a)}
             else
-              o.send(att)
+              o.get_column_value(att)
             end
             procs.each {|tag, p| p.call(o, att, v)}
           end
@@ -124,8 +116,8 @@ module Sequel
         # :allow_nil is assumed to be true instead of false.
         #
         # Possible Options:
-        # * :accept - The value required for the object to be valid (default: '1')
-        # * :message - The message to use (default: 'is not accepted')
+        # :accept :: The value required for the object to be valid (default: '1')
+        # :message :: The message to use (default: 'is not accepted')
         def validates_acceptance_of(*atts)
           opts = {
             :message => 'is not accepted',
@@ -149,7 +141,7 @@ module Sequel
         # or email addresses on web forms.
         #
         # Possible Options:
-        # * :message - The message to use (default: 'is not confirmed')
+        # :message :: The message to use (default: 'is not confirmed')
         def validates_confirmation_of(*atts)
           opts = {
             :message => 'is not confirmed',
@@ -158,7 +150,7 @@ module Sequel
           reflect_validation(:confirmation, opts, atts)
           atts << opts
           validates_each(*atts) do |o, a, v|
-            o.errors.add(a, opts[:message]) unless v == o.send(:"#{a}_confirmation")
+            o.errors.add(a, opts[:message]) unless v == o.get_column_value(:"#{a}_confirmation")
           end
         end
     
@@ -171,27 +163,27 @@ module Sequel
         #   end
         #
         # Possible Options:
-        # * :allow_blank - Whether to skip the validation if the value is blank. 
-        # * :allow_missing - Whether to skip the validation if the attribute isn't a key in the
-        #   values hash.  This is different from allow_nil, because Sequel only sends the attributes
-        #   in the values when doing an insert or update.  If the attribute is not present, Sequel
-        #   doesn't specify it, so the database will use the table's default value.  This is different
-        #   from having an attribute in values with a value of nil, which Sequel will send as NULL.
-        #   If your database table has a non NULL default, this may be a good option to use.  You
-        #   don't want to use allow_nil, because if the attribute is in values but has a value nil,
-        #   Sequel will attempt to insert a NULL value into the database, instead of using the
-        #   database's default.
-        # * :allow_nil - Whether to skip the validation if the value is nil.
-        # * :if - A symbol (indicating an instance_method) or proc (which is instance_evaled)
-        #   skipping this validation if it returns nil or false.
-        # * :tag - The tag to use for this validation.
+        # :allow_blank :: Whether to skip the validation if the value is blank. 
+        # :allow_missing :: Whether to skip the validation if the attribute isn't a key in the
+        #                   values hash.  This is different from allow_nil, because Sequel only sends the attributes
+        #                   in the values when doing an insert or update.  If the attribute is not present, Sequel
+        #                   doesn't specify it, so the database will use the table's default value.  This is different
+        #                   from having an attribute in values with a value of nil, which Sequel will send as NULL.
+        #                   If your database table has a non NULL default, this may be a good option to use.  You
+        #                   don't want to use allow_nil, because if the attribute is in values but has a value nil,
+        #                   Sequel will attempt to insert a NULL value into the database, instead of using the
+        #                   database's default.
+        # :allow_nil :: Whether to skip the validation if the value is nil.
+        # :if :: A symbol (indicating an instance_method) or proc (which is instance_evaled)
+        #        skipping this validation if it returns nil or false.
+        # :tag :: The tag to use for this validation.
         def validates_each(*atts, &block)
           opts = extract_options!(atts)
           blk = if (i = opts[:if]) || (am = opts[:allow_missing]) || (an = opts[:allow_nil]) || (ab = opts[:allow_blank])
             proc do |o,a,v|
               next if i && !validation_if_proc(o, i)
-              next if an && Array(v).all?{|x| x.nil?}
-              next if ab && Array(v).all?{|x| x.blank?}
+              next if an && Array(v).all?(&:nil?)
+              next if ab && Array(v).all?(&:blank?)
               next if am && Array(a).all?{|x| !o.values.has_key?(x)}
               block.call(o,a,v)
             end
@@ -200,7 +192,7 @@ module Sequel
           end
           tag = opts[:tag]
           atts.each do |a| 
-            a_vals = @validation_mutex.synchronize{validations[a] ||= []}
+            a_vals = Sequel.synchronize{validations[a] ||= []}
             if tag && (old = a_vals.find{|x| x[0] == tag})
               old[1] = blk
             else
@@ -213,8 +205,8 @@ module Sequel
         # value against the regular expression provided by the :with option.
         #
         # Possible Options:
-        # * :message - The message to use (default: 'is invalid')
-        # * :with - The regular expression to validate the value with (required).
+        # :message :: The message to use (default: 'is invalid')
+        # :with :: The regular expression to validate the value with (required).
         def validates_format_of(*atts)
           opts = {
             :message => 'is invalid',
@@ -235,16 +227,16 @@ module Sequel
         # Validates the length of an attribute.
         #
         # Possible Options:
-        # * :is - The exact size required for the value to be valid (no default)
-        # * :maximum - The maximum size allowed for the value (no default)
-        # * :message - The message to use (no default, overrides :nil_message, :too_long, :too_short, and :wrong_length
-        #   options if present)
-        # * :minimum - The minimum size allowed for the value (no default)
-        # * :nil_message - The message to use use if :maximum option is used and the value is nil (default: 'is not present')
-        # * :too_long - The message to use use if it the value is too long (default: 'is too long')
-        # * :too_short - The message to use use if it the value is too short (default: 'is too short')
-        # * :within - The array/range that must include the size of the value for it to be valid (no default)
-        # * :wrong_length - The message to use use if it the value is not valid (default: 'is the wrong length')
+        # :is :: The exact size required for the value to be valid (no default)
+        # :maximum :: The maximum size allowed for the value (no default)
+        # :message :: The message to use (no default, overrides :nil_message, :too_long, :too_short, and :wrong_length
+        #             options if present)
+        # :minimum :: The minimum size allowed for the value (no default)
+        # :nil_message :: The message to use use if :maximum option is used and the value is nil (default: 'is not present')
+        # :too_long :: The message to use use if it the value is too long (default: 'is too long')
+        # :too_short :: The message to use use if it the value is too short (default: 'is too short')
+        # :within :: The array/range that must include the size of the value for it to be valid (no default)
+        # :wrong_length :: The message to use use if it the value is not valid (default: 'is the wrong length')
         def validates_length_of(*atts)
           opts = {
             :nil_message  => 'is not present',
@@ -272,40 +264,11 @@ module Sequel
           end
         end
     
-        # Validates whether an attribute is not a string.  This is generally useful
-        # in conjunction with raise_on_typecast_failure = false, where you are
-        # passing in string values for non-string attributes (such as numbers and dates).
-        # If typecasting fails (invalid number or date), the value of the attribute will
-        # be a string in an invalid format, and if typecasting succeeds, the value will
-        # not be a string.
-        #
-        # Possible Options:
-        # * :message - The message to use (default: 'is a string' or 'is not a valid (integer|datetime|etc.)' if the type is known)
-        def validates_not_string(*atts)
-          opts = {
-            :tag => :not_string,
-          }.merge!(extract_options!(atts))
-          reflect_validation(:not_string, opts, atts)
-          atts << opts
-          validates_each(*atts) do |o, a, v|
-            if v.is_a?(String)
-              unless message = opts[:message]
-                message = if sch = o.db_schema[a] and typ = sch[:type]
-                  "is not a valid #{typ}"
-                else
-                  "is a string"
-                end
-              end
-              o.errors.add(a, message)
-            end
-          end
-        end
-    
         # Validates whether an attribute is a number.
         #
         # Possible Options:
-        # * :message - The message to use (default: 'is not a number')
-        # * :only_integer - Whether only integers are valid values (default: false)
+        # :message :: The message to use (default: 'is not a number')
+        # :only_integer :: Whether only integers are valid values (default: false)
         def validates_numericality_of(*atts)
           opts = {
             :message => 'is not a number',
@@ -330,7 +293,7 @@ module Sequel
         # with false considered present instead of absent.
         #
         # Possible Options:
-        # * :message - The message to use (default: 'is not present')
+        # :message :: The message to use (default: 'is not present')
         def validates_presence_of(*atts)
           opts = {
             :message => 'is not present',
@@ -346,8 +309,8 @@ module Sequel
         # Validates that an attribute is within a specified range or set of values.
         #
         # Possible Options:
-        # * :in - An array or range of values to check for validity (required)
-        # * :message - The message to use (default: 'is not in range or set: <specified range>')
+        # :in :: An array or range of values to check for validity (required)
+        # :message :: The message to use (default: 'is not in range or set: <specified range>')
         def validates_inclusion_of(*atts)
           opts = extract_options!(atts)
           n = opts[:in]
@@ -359,6 +322,28 @@ module Sequel
           atts << opts
           validates_each(*atts) do |o, a, v|
             o.errors.add(a, opts[:message]) unless n.send(n.respond_to?(:cover?) ? :cover? : :include?, v)
+          end
+        end
+    
+        # Validates whether an attribute has the correct ruby type for the associated
+        # database type.  This is generally useful in conjunction with
+        # raise_on_typecast_failure = false, to handle typecasting errors at validation
+        # time instead of at setter time. 
+        #
+        # Possible Options:
+        # :message :: The message to use (default: 'is not a valid (integer|datetime|etc.)')
+        def validates_schema_type(*atts)
+          opts = {
+            :tag => :schema_type,
+          }.merge!(extract_options!(atts))
+          reflect_validation(:schema_type, opts, atts)
+          atts << opts
+          validates_each(*atts) do |o, a, v|
+            next if v.nil? || (klass = o.send(:schema_type_class, a)).nil?
+            if klass.is_a?(Array) ? !klass.any?{|kls| v.is_a?(kls)} : !v.is_a?(klass)
+              message = opts[:message] || "is not a valid #{Array(klass).join(" or ").downcase}"
+              o.errors.add(a, message)
+            end
           end
         end
     
@@ -377,7 +362,7 @@ module Sequel
         # database, as this suffers from a fairly obvious race condition.
         #
         # Possible Options:
-        # * :message - The message to use (default: 'is already taken')
+        # :message :: The message to use (default: 'is already taken')
         def validates_uniqueness_of(*atts)
           opts = {
             :message => 'is already taken',
@@ -433,7 +418,7 @@ module Sequel
         def validation_if_proc(o, i)
           case i
           when Symbol
-            o.send(i)
+            o.get_column_value(i)
           when Proc
             o.instance_eval(&i)
           else
@@ -446,6 +431,7 @@ module Sequel
         # Validates the object.
         def validate
           model.validate(self)
+          super
         end
       end
     end

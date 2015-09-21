@@ -1,10 +1,20 @@
+Sequel::JDBC.load_driver('Java::cubrid.jdbc.driver.CUBRIDDriver')
 Sequel.require 'adapters/shared/cubrid'
 Sequel.require 'adapters/jdbc/transactions'
 
 module Sequel
   module JDBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:cubrid] = proc do |db|
+        db.extend(Sequel::JDBC::Cubrid::DatabaseMethods)
+        db.extend_datasets Sequel::Cubrid::DatasetMethods
+        Java::cubrid.jdbc.driver.CUBRIDDriver
+      end
+    end
+
     module Cubrid
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::Cubrid::DatabaseMethods
         include Sequel::JDBC::Transactions
 
@@ -15,12 +25,12 @@ module Sequel
         private
         
         # Get the last inserted id using LAST_INSERT_ID().
-        def last_insert_id(conn, opts={})
+        def last_insert_id(conn, opts=OPTS)
           if stmt = opts[:stmt]
             rs = stmt.getGeneratedKeys
             begin
               if rs.next
-                rs.getInt(1)
+                rs.getLong(1)
               end
             rescue NativeException
               nil

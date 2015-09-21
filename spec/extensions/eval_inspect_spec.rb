@@ -1,5 +1,7 @@
 require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
+Sequel.extension :eval_inspect
+
 describe "eval_inspect extension" do
   before do
     @ds = Sequel.mock.dataset
@@ -7,10 +9,11 @@ describe "eval_inspect extension" do
     @ds.meta_def(:literal_blob_append){|sql, s| sql << "X'#{s}'"}
   end
 
-  specify "should make eval(obj.inspect) == obj for all Sequel::SQL::Expression subclasses" do
+  it "should make eval(obj.inspect) == obj for all Sequel::SQL::Expression subclasses" do
     [
       # Objects with components where eval(inspect) == self
       Sequel::SQL::AliasedExpression.new(:b, :a),
+      Sequel::SQL::AliasedExpression.new(:b, :a, [:c, :d]),
       Sequel::SQL::CaseExpression.new({:b=>:a}, :c),
       Sequel::SQL::CaseExpression.new({:b=>:a}, :c, :d),
       Sequel::SQL::Cast.new(:a, :b),
@@ -26,9 +29,12 @@ describe "eval_inspect extension" do
       Sequel::NOTNULL,
       Sequel::SQL::Function.new(:a, :b, :c),
       Sequel::SQL::Identifier.new(:a),
-      Sequel::SQL::JoinClause.new(:inner, :b, :c),
-      Sequel::SQL::JoinOnClause.new({:d=>:a}, :inner, :b, :c),
-      Sequel::SQL::JoinUsingClause.new([:a], :inner, :b, :c),
+      Sequel::SQL::JoinClause.new(:inner, :b),
+      Sequel::SQL::JoinOnClause.new({:d=>:a}, :inner, :b),
+      Sequel::SQL::JoinUsingClause.new([:a], :inner, :b),
+      Sequel::SQL::JoinClause.new(:inner, Sequel.as(:b, :c, [:d, :e])),
+      Sequel::SQL::JoinOnClause.new({:d=>:a}, :inner, Sequel.as(:b, :c, [:d, :e])),
+      Sequel::SQL::JoinUsingClause.new([:a], :inner, Sequel.as(:b, :c, [:d, :e])),
       Sequel::SQL::PlaceholderLiteralString.new('? = ?', [:a, :b]),
       Sequel::SQL::PlaceholderLiteralString.new(':a = :b', [{:a=>:b, :b=>42}]),
       Sequel::SQL::OrderedExpression.new(:a),
@@ -38,7 +44,7 @@ describe "eval_inspect extension" do
       Sequel::SQL::QualifiedIdentifier.new(:b, :a),
       Sequel::SQL::Subscript.new(:a, [1, 2]),
       Sequel::SQL::Window.new(:order=>:a, :partition=>:b),
-      Sequel::SQL::WindowFunction.new(Sequel::SQL::Function.new(:a, :b, :c), Sequel::SQL::Window.new(:order=>:a, :partition=>:b)),
+      Sequel::SQL::Function.new(:a, :b, :c).over(:order=>:a, :partition=>:b),
       Sequel::SQL::Wrapper.new(:a),
       
       # Objects with components where eval(inspect) != self
@@ -60,8 +66,8 @@ describe "eval_inspect extension" do
       Sequel::SQL::AliasedExpression.new(Sequel::CURRENT_TIMESTAMP, :a),
     ].each do |o|
       v = eval(o.inspect)
-      v.should == o
-      @ds.literal(v).should == @ds.literal(o)
+      v.must_equal o
+      @ds.literal(v).must_equal @ds.literal(o)
     end
   end
 end

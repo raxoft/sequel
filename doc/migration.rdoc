@@ -26,7 +26,7 @@ you generally need to run Sequel's migrator with <tt>bin/sequel -m</tt>:
 Migrations in Sequel use a very simple DSL via the <tt>Sequel.migration</tt>
 method, and inside the DSL, use the <tt>Sequel::Database</tt> schema
 modification methods such as +create_table+ and +alter_table+.
-See the {schema modification guide}[link:files/doc/schema_modification_rdoc.html]
+See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
 for details on the schema modification methods you can use.
 
 == A Basic Migration
@@ -72,6 +72,8 @@ reverse the given migration.  The +change+ block can usually correctly reverse
 the following methods:
 
 * +create_table+
+* +create_join_table+
+* +create_view+
 * +add_column+
 * +add_index+
 * +rename_column+
@@ -100,7 +102,7 @@ from Sacramento, CA, USA, but now you want to branch out and include artists in 
   Sequel.migration do
     up do
       add_column :artists, :location, String
-      self[:artists].update(:location=>'Sacramento')
+      from(:artists).update(:location=>'Sacramento')
     end
 
     down do
@@ -114,10 +116,10 @@ because future artists should not be assumed to come from Sacramento.  In the +d
 just drops the +location+ column from the +artists+ table, reversing the actions of the up
 block.
 
-Note that when updating the +artists+ table in the update, a plain dataset is used, <tt>self[:artists]</tt>.
+Note that when updating the +artists+ table in the update, a plain dataset is used, <tt>from(:artists)</tt>.
 This looks a little weird, but you need to be aware that inside an up or +down+ block in a migration,
 self always refers to the <tt>Sequel::Database</tt> object that the migration is being applied to.
-Since <tt>Database#[]</tt> creates datasets, using <tt>self[:artists]</tt> inside the +up+ block creates
+Since <tt>Database#from</tt> creates datasets, using <tt>from(:artists)</tt> inside the +up+ block creates
 a dataset on the database representing all columns in the +artists+ table, and updates it to set the
 +location+ column to <tt>'Sacramento'</tt>.  You should avoid referencing the <tt>Sequel::Database</tt>
 object directly in your migration, and always use self to reference it, otherwise you may run into problems.
@@ -130,7 +132,7 @@ to create their development database.
 == The +migration+ extension
 
 The migration code is not technically part of the core of Sequel.  It's not loaded by default as it
-is only useful in specific cases.  It is one of the built-in extensions, which receive the same
+is only useful in specific cases.  It is one of the extensions that ship with Sequel, which receive the same
 level of support as Sequel's core.
 
 If you want to play with Sequel's migration tools without using the <tt>bin/sequel</tt> tool, you
@@ -144,7 +146,7 @@ Migrations themselves do not contain any schema modification methods, but they m
 any of the <tt>Sequel::Database</tt> modification methods, of which there are many.  The main
 ones are +create_table+ and +alter_table+, but Sequel also comes with numerous other schema
 modification methods, most of which are shortcuts for +alter_table+ (all of these methods are
-described in more detail in the {schema modification guide}[link:files/doc/schema_modification_rdoc.html]):
+described in more detail in the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]):
 
 * add_column
 * add_index
@@ -240,7 +242,7 @@ the +TimestampMigrator+.  They both have plusses and minuses:
 
 * Simpler, uses migration versions starting with 1
 * Doesn't allow duplicate migrations
-* Doesn't allow missing migrations
+* Doesn't allow missing migrations by default
 * Just stores the version of the last migration run
 * Good for single developer or small teams with close
   communication
@@ -255,7 +257,7 @@ the +TimestampMigrator+.  They both have plusses and minuses:
 * Allows missing migrations (since you obviously don't have one every second)
 * Stores the file names of all applied migrations
 * Good for large teams without close communication
-* Higher risk of undected conflicting migrations
+* Higher risk of undetected conflicting migrations
 * Does not require manual merging of simultaneous migrations
 
 === Filenames
@@ -293,7 +295,7 @@ to worry about that issue until the 1000th migration:
   009_do_something.rb
   010_do_something_else.rb
 
-It should be fairly obvious, but migrations start at 1, not 0.  The migration version number 0
+Migrations start at 1, not 0.  The migration version number 0
 is important though, as it is used to mean that all migrations should be unapplied (i.e. all
 +down+ blocks run).  In Sequel, you can do that with:
 
@@ -349,12 +351,16 @@ So for unrelated migrations, the +TimestampMigrator+ works fine.  However, let's
 migrations are related, in such a way that if Bob's is run first, Alice's will fail.  In this
 case, the +TimestampMigrator+ would not raise an error when Bob merges Alice's changes, since
 Bob ran his migration first.  However, it would raise an error when Alice runs Bob's migration,
-and could leave the database in an inconsistant state if the database doesn't support transactional
+and could leave the database in an inconsistent state if the database doesn't support transactional
 schema changes.
 
 With the +TimestampMigrator+, you are trading reliability for convenience.  That's possibly a valid
 trade, especially if simultaneous related schema changes by separate developers are unlikely, but
 you should give it some thought before using it.
+
+== Ignoring missing migrations
+
+In some cases, you may want to allow a migration in the database that does not exist in the filesystem (deploying to an older version of code without running a down migration when deploy auto-migrates, for example). If required, you can pass <tt>:allow_missing_migration_files => true</tt> as an option. This will stop errors from being raised if there are migrations in the database that do not exist in the filesystem.
 
 == Modifying existing migrations
 
@@ -381,14 +387,14 @@ However, the migrations you write should contain an +up+ block that does somethi
 reverses the changes made by the +up+ block:
 
   Sequel.migration do
-    up{...}
-    down{...}
+    up{}
+    down{}
   end
 
 or they should use the reversible migrations feature with a +change+ block:
 
   Sequel.migration do
-    change{...}
+    change{}
   end
 
 == What to put in your migration's +down+ block
@@ -477,6 +483,36 @@ unapplied migrations will be migrated up.  If you provide a <tt>-M</tt>, it will
 depend on which migrations that have been applied.  Applied migrations greater
 than that version will be migrated down, while unapplied migrations less than
 or equal to that version will be migrated up.
+
+== Running migrations from a Rake task
+
+You can also incorporate migrations into a Rakefile. Here's an example
+using integer migration versions.
+
+  namespace :db do
+    desc "Run migrations"
+    task :migrate, [:version] do |t, args|
+      require "sequel"
+      Sequel.extension :migration
+      db = Sequel.connect(ENV.fetch("DATABASE_URL"))
+      if args[:version]
+        puts "Migrating to version #{args[:version]}"
+        Sequel::Migrator.run(db, "db/migrations", target: args[:version].to_i)
+      else
+        puts "Migrating to latest"
+        Sequel::Migrator.run(db, "db/migrations")
+      end
+    end
+  end
+
+To migrate to the latest version, run:
+
+  rake db:migrate
+
+This Rake task takes an optional argument specifying the target
+version. To migrate to version 42, run:
+
+  rake db:migrate[42]
 
 == Verbose migrations
 

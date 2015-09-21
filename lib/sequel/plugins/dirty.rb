@@ -38,7 +38,12 @@ module Sequel
     #   artist.update(:name=>'Bar')
     #   artist.column_changes        # => {}
     #   artist.previous_changes      # => {:name=>['Foo', 'Bar']}
-    # 
+    #
+    # There is one caveat; when used with a column that also uses the
+    # serialization plugin, setting the column back to its original value
+    # after changing it is not correctly detected and will leave an entry
+    # in changed_columns.
+    #
     # Usage:
     #
     #   # Make all model subclass instances record previous values (called before loading subclasses)
@@ -60,7 +65,7 @@ module Sequel
         #
         #   column_change(:name) # => ['Initial', 'Current']
         def column_change(column)
-          [initial_value(column), send(column)] if column_changed?(column)
+          [initial_value(column), get_column_value(column)] if column_changed?(column)
         end
 
         # A hash with column symbol keys and pairs of initial and
@@ -70,7 +75,7 @@ module Sequel
         def column_changes
           h = {}
           initial_values.each do |column, value|
-            h[column] = [value, send(column)]
+            h[column] = [value, get_column_value(column)]
           end
           h
         end
@@ -85,13 +90,21 @@ module Sequel
           initial_values.has_key?(column)
         end
 
+        # Freeze internal data structures
+        def freeze
+          initial_values.freeze
+          missing_initial_values.freeze
+          @previous_changes.freeze if @previous_changes
+          super
+        end
+
         # The initial value of the given column.  If the column value has
         # not changed, this will be the same as the current value of the
         # column.
         #
         #   initial_value(:name) # => 'Initial'
         def initial_value(column)
-          initial_values.fetch(column){send(column)}
+          initial_values.fetch(column){get_column_value(column)}
         end
 
         # A hash with column symbol keys and initial values.
@@ -108,7 +121,7 @@ module Sequel
         #   name # => 'Initial'
         def reset_column(column)
           if initial_values.has_key?(column)
-            send(:"#{column}=", initial_values[column])
+            set_column_value(:"#{column}=", initial_values[column])
           end
           if missing_initial_values.include?(column)
             values.delete(column)
@@ -128,7 +141,7 @@ module Sequel
           value = if initial_values.has_key?(column)
             initial_values[column]
           else
-            send(column)
+            get_column_value(column)
           end
 
           initial_values[column] = if value && value != true && value.respond_to?(:clone)
@@ -144,6 +157,12 @@ module Sequel
 
         private
 
+        # Reset the initial values when setting values.
+        def _refresh_set_values(hash)
+          reset_initial_values
+          super
+        end
+
         # Reset the initial values after saving.
         def after_save
           super
@@ -155,12 +174,6 @@ module Sequel
         def after_update
           super
           @previous_changes = column_changes
-        end
-
-        # Reset the initial values when refreshing.
-        def _refresh(dataset)
-          super
-          reset_initial_values
         end
 
         # When changing the column value, save the initial column value.  If the column
@@ -176,7 +189,7 @@ module Sequel
             end
           else
             check_missing_initial_value(column)
-            iv[column] = send(column)
+            iv[column] = get_column_value(column)
             super
           end
         end
@@ -188,6 +201,15 @@ module Sequel
           unless values.has_key?(column) || (miv = missing_initial_values).include?(column)
             miv << column
           end
+        end
+
+        # Duplicate internal data structures
+        def initialize_copy(other)
+          super
+          @initial_values = Hash[other.initial_values]
+          @missing_initial_values = other.send(:missing_initial_values).dup
+          @previous_changes = Hash[other.previous_changes] if other.previous_changes
+          self
         end
 
         # Reset the initial values when initializing.

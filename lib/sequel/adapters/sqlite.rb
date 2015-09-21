@@ -91,21 +91,20 @@ module Sequel
       # The conversion procs to use for this database
       attr_reader :conversion_procs
 
-      def initialize(opts={})
-        super
-        @conversion_procs = SQLITE_TYPES.dup
-        @conversion_procs['datetime'] = @conversion_procs['timestamp'] = method(:to_application_timestamp)
-        set_integer_booleans
-      end
-      
-      # Connect to the database.  Since SQLite is a file based database,
-      # the only options available are :database (to specify the database
-      # name), and :timeout, to specify how long to wait for the database to
-      # be available if it is locked, given in milliseconds (default is 5000).
+      # Connect to the database. Since SQLite is a file based database,
+      # available options are limited:
+      #
+      # :database :: database name (filename or ':memory:' or file: URI)
+      # :readonly :: open database in read-only mode; useful for reading
+      #              static data that you do not want to modify
+      # :timeout :: how long to wait for the database to be available if it
+      #             is locked, given in milliseconds (default is 5000)
       def connect(server)
         opts = server_opts(server)
         opts[:database] = ':memory:' if blank_object?(opts[:database])
-        db = ::SQLite3::Database.new(opts[:database])
+        sqlite3_opts = {}
+        sqlite3_opts[:readonly] = typecast_value_boolean(opts[:readonly]) if opts.has_key?(:readonly)
+        db = ::SQLite3::Database.new(opts[:database].to_s, sqlite3_opts)
         db.busy_timeout(opts.fetch(:timeout, 5000))
         
         connection_pragmas.each{|s| log_yield(s){db.execute_batch(s)}}
@@ -125,19 +124,19 @@ module Sequel
       end
       
       # Run the given SQL with the given arguments and yield each row.
-      def execute(sql, opts={}, &block)
+      def execute(sql, opts=OPTS, &block)
         _execute(:select, sql, opts, &block)
       end
 
       # Run the given SQL with the given arguments and return the number of changed rows.
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         _execute(:update, sql, opts)
       end
       
       # Drop any prepared statements on the connection when executing DDL.  This is because
       # prepared statements lock the table in such a way that you can't drop or alter the
       # table while a prepared statement that references it still exists.
-      def execute_ddl(sql, opts={})
+      def execute_ddl(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           conn.prepared_statements.values.each{|cps, s| cps.close}
           conn.prepared_statements.clear
@@ -146,7 +145,7 @@ module Sequel
       end
       
       # Run the given SQL with the given arguments and return the last inserted row id.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         _execute(:insert, sql, opts)
       end
       
@@ -165,6 +164,12 @@ module Sequel
       end
 
       private
+      
+      def adapter_initialize
+        @conversion_procs = SQLITE_TYPES.dup
+        @conversion_procs['datetime'] = @conversion_procs['timestamp'] = method(:to_application_timestamp)
+        set_integer_booleans
+      end
       
       # Yield an available connection.  Rescue
       # any SQLite3::Exceptions and turn them into DatabaseErrors.
@@ -204,10 +209,16 @@ module Sequel
       
       def prepared_statement_argument(arg)
         case arg
-        when Date, DateTime, Time, TrueClass, FalseClass
+        when Date, DateTime, Time
           literal(arg)[1...-1]
         when SQL::Blob
           arg.to_blob
+        when true, false
+          if integer_booleans
+            arg ? 1 : 0
+          else
+            literal(arg)[1...-1]
+          end
         else
           arg
         end
@@ -293,52 +304,9 @@ module Sequel
         end
       end
       
-      # SQLite prepared statement uses a new prepared statement each time
-      # it is called, but it does use the bind arguments.
-      module BindArgumentMethods
-        include ArgumentMapper
-        
-        private
-        
-        # Run execute_select on the database with the given SQL and the stored
-        # bind arguments.
-        def execute(sql, opts={}, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts={}, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts={}, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-      end
+      BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
+      PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
-      module PreparedStatementMethods
-        include BindArgumentMethods
-          
-        private
-          
-        # Execute the stored prepared statement name and the stored bind
-        # arguments instead of the SQL given.
-        def execute(sql, opts={}, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-         
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts={}, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-          
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts={}, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-      end
-        
       # Execute the given type of statement with the hash of values.
       def call(type, bind_vars={}, *values, &block)
         ps = to_prepared_statement(type, values)
@@ -353,11 +321,11 @@ module Sequel
           cps = db.conversion_procs
           type_procs = result.types.map{|t| cps[base_type_name(t)]}
           cols = result.columns.map{|c| i+=1; [output_identifier(c), i, type_procs[i]]}
-          @columns = cols.map{|c| c.first}
+          @columns = cols.map(&:first)
           result.each do |values|
             row = {}
-            cols.each do |name,i,type_proc|
-              v = values[i]
+            cols.each do |name,id,type_proc|
+              v = values[id]
               if type_proc && v
                 v = type_proc.call(v)
               end

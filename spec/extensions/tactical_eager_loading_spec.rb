@@ -2,7 +2,7 @@ require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe "Sequel::Plugins::TacticalEagerLoading" do
   before do
-    class ::TaticalEagerLoadingModel < Sequel::Model
+    class ::TacticalEagerLoadingModel < Sequel::Model
       plugin :tactical_eager_loading
       columns :id, :parent_id
       many_to_one :parent, :class=>self
@@ -10,6 +10,8 @@ describe "Sequel::Plugins::TacticalEagerLoading" do
       dataset._fetch = proc do |sql|
         if sql !~ /WHERE/
           [{:id=>1, :parent_id=>101}, {:id=>2, :parent_id=>102}, {:id=>101, :parent_id=>nil}, {:id=>102, :parent_id=>nil}]
+        elsif sql =~ /WHERE.*\bid = (\d+)/
+          [{:id=>$1.to_i, :parent_id=>nil}]
         elsif sql =~ /WHERE.*\bid IN \(([\d, ]*)\)/
           $1.split(', ').map{|x| {:id=>x.to_i, :parent_id=>nil}}
         elsif sql =~ /WHERE.*\bparent_id IN \(([\d, ]*)\)/
@@ -17,40 +19,40 @@ describe "Sequel::Plugins::TacticalEagerLoading" do
         end
       end
     end
-    @c = ::TaticalEagerLoadingModel
-    @ds = TaticalEagerLoadingModel.dataset
-    MODEL_DB.reset
+    @c = ::TacticalEagerLoadingModel
+    @ds = TacticalEagerLoadingModel.dataset
+    DB.reset
   end
   after do
-    Object.send(:remove_const, :TaticalEagerLoadingModel)
+    Object.send(:remove_const, :TacticalEagerLoadingModel)
   end
 
   it "Dataset#all should set the retrieved_by and retrieved_with attributes" do
     ts = @c.all
-    ts.map{|x| [x.retrieved_by, x.retrieved_with]}.should == [[@ds,ts], [@ds,ts], [@ds,ts], [@ds,ts]]
+    ts.map{|x| [x.retrieved_by, x.retrieved_with]}.must_equal [[@ds,ts], [@ds,ts], [@ds,ts], [@ds,ts]]
   end
 
   it "Dataset#all shouldn't raise an error if a Sequel::Model instance is not returned" do
-    proc{@c.naked.all}.should_not raise_error
+    @c.naked.all
   end
 
   it "association getter methods should eagerly load the association if the association isn't cached" do
-    MODEL_DB.sqls.length.should == 0
+    DB.sqls.length.must_equal 0
     ts = @c.all
-    MODEL_DB.sqls.length.should == 1
-    ts.map{|x| x.parent}.should == [ts[2], ts[3], nil, nil]
-    MODEL_DB.sqls.length.should == 1
-    ts.map{|x| x.children}.should == [[], [], [ts[0]], [ts[1]]]
-    MODEL_DB.sqls.length.should == 1
+    DB.sqls.length.must_equal 1
+    ts.map{|x| x.parent}.must_equal [ts[2], ts[3], nil, nil]
+    DB.sqls.length.must_equal 1
+    ts.map{|x| x.children}.must_equal [[], [], [ts[0]], [ts[1]]]
+    DB.sqls.length.must_equal 1
   end
 
   it "association getter methods should not eagerly load the association if the association is cached" do
-    MODEL_DB.sqls.length.should == 0
+    DB.sqls.length.must_equal 0
     ts = @c.all
-    MODEL_DB.sqls.length.should == 1
-    ts.map{|x| x.parent}.should == [ts[2], ts[3], nil, nil]
-    @ds.should_not_receive(:eager_load)
-    ts.map{|x| x.parent}.should == [ts[2], ts[3], nil, nil]
+    DB.sqls.length.must_equal 1
+    ts.map{|x| x.parent}.must_equal [ts[2], ts[3], nil, nil]
+    def @ds.eager_load(*) raise end
+    ts.map{|x| x.parent}.must_equal [ts[2], ts[3], nil, nil]
   end
 
   it "should handle case where an association is valid on an instance, but not on all instances" do
@@ -60,4 +62,21 @@ describe "Sequel::Plugins::TacticalEagerLoading" do
     @c.all{|x| x.parent2 if x.is_a?(c)}
   end
 
+  it "association getter methods should not eagerly load the association if an instance is frozen" do
+    ts = @c.all
+    ts.first.freeze
+    DB.sqls.length.must_equal 1
+    ts.map{|x| x.parent}.must_equal [ts[2], ts[3], nil, nil]
+    DB.sqls.length.must_equal 2
+    ts.map{|x| x.children}.must_equal [[], [], [ts[0]], [ts[1]]]
+    DB.sqls.length.must_equal 2
+    ts.map{|x| x.parent}.must_equal [ts[2], ts[3], nil, nil]
+    DB.sqls.length.must_equal 1
+    ts.map{|x| x.children}.must_equal [[], [], [ts[0]], [ts[1]]]
+    DB.sqls.length.must_equal 1
+  end
+
+  it "#marshallable should make marshalling not fail" do
+    Marshal.dump(@c.all.map{|x| x.marshallable!})
+  end
 end

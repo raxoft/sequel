@@ -6,7 +6,7 @@ module Sequel
      CUBRID_TYPE_PROCS = {
        ::Cubrid::DATE => lambda{|t| Date.new(t.year, t.month, t.day)},
        ::Cubrid::TIME => lambda{|t| SQLTime.create(t.hour, t.min, t.sec)},
-       21 => lambda{|s| s.to_i}
+       21 => lambda(&:to_i)
      }
 
     class Database < Sequel::Database
@@ -31,10 +31,10 @@ module Sequel
       end
 
       def server_version
-        @server_version ||= synchronize{|c| c.server_version}
+        @server_version ||= synchronize(&:server_version)
       end
       
-      def execute(sql, opts={})
+      def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           r = log_yield(sql) do
             begin
@@ -75,25 +75,25 @@ module Sequel
         end
       end
 
-      def execute_ddl(sql, opts={})
+      def execute_ddl(sql, opts=OPTS)
         execute(sql, opts.merge(:type=>:ddl))
       end
 
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         execute(sql, opts.merge(:type=>:dui))
       end
 
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         execute(sql, opts.merge(:type=>:insert))
       end
 
       private
 
-      def begin_transaction(conn, opts={})
+      def begin_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_BEGIN){conn.auto_commit = false}
       end
       
-      def commit_transaction(conn, opts={})
+      def commit_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_COMMIT){conn.commit}
       end
 
@@ -109,7 +109,7 @@ module Sequel
       
       # This doesn't actually work, as the cubrid ruby driver
       # does not implement transactions correctly.
-      def rollback_transaction(conn, opts={})
+      def rollback_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_ROLLBACK){conn.rollback}
       end
     end
@@ -124,9 +124,8 @@ module Sequel
       def fetch_rows(sql)
         execute(sql) do |stmt|
           begin
-            procs = 
             cols = stmt.column_info.map{|c| [output_identifier(c[COLUMN_INFO_NAME]), CUBRID_TYPE_PROCS[c[COLUMN_INFO_TYPE]]]}
-            @columns = cols.map{|c| c.first}
+            @columns = cols.map(&:first)
             stmt.each do |r|
               row = {}
               cols.zip(r).each{|(k, p), v| row[k] = (v && p) ? p.call(v) : v}

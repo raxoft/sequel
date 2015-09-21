@@ -24,6 +24,7 @@
 #
 #   DB[:table].select(add.as(:d)).where(sub > Sequel::CURRENT_TIMESTAMP)
 
+#
 module Sequel
   module SQL
     module Builders
@@ -59,8 +60,9 @@ module Sequel
         MSSQL_DURATION_UNITS = DURATION_UNITS.zip(DURATION_UNITS.map{|s| Sequel.lit(s.to_s[0...-1]).freeze}).freeze
         H2_DURATION_UNITS = DURATION_UNITS.zip(DURATION_UNITS.map{|s| s.to_s[0...-1].freeze}).freeze
         DERBY_DURATION_UNITS = DURATION_UNITS.zip(DURATION_UNITS.map{|s| Sequel.lit("SQL_TSI_#{s.to_s.upcase[0...-1]}").freeze}).freeze
-        ACCESS_DURATION_UNITS = DURATION_UNITS.zip(%w'yyyy m d h n s'.map{|s| s.freeze}).freeze
+        ACCESS_DURATION_UNITS = DURATION_UNITS.zip(%w'yyyy m d h n s'.map(&:freeze)).freeze
         DB2_DURATION_UNITS = DURATION_UNITS.zip(DURATION_UNITS.map{|s| Sequel.lit(s.to_s).freeze}).freeze
+        FDBSQL_DURATION_UNITS = DURATION_UNITS.zip(DURATION_UNITS.map{|s| Sequel.lit(s.to_s.chop).freeze}).freeze
 
         # Append the SQL fragment for the DateAdd expression to the SQL query.
         def date_add_sql_append(sql, da)
@@ -82,7 +84,7 @@ module Sequel
             each_valid_interval_unit(h, DEF_DURATION_UNITS) do |value, sql_unit|
               args << "#{value} #{sql_unit}"
             end
-            return _function_sql_append(sql, :datetime, args)
+            return function_sql_append(sql, Sequel.function(:datetime, *args))
           when :mysql, :hsqldb, :cubrid
             if db_type == :hsqldb
               # HSQLDB requires 2.2.9+ for the DATE_ADD function
@@ -91,9 +93,9 @@ module Sequel
             each_valid_interval_unit(h, MYSQL_DURATION_UNITS) do |value, sql_unit|
               expr = Sequel.function(:DATE_ADD, expr, Sequel.lit(["INTERVAL ", " "], value, sql_unit))
             end
-          when :mssql, :h2, :access
+          when :mssql, :h2, :access, :sqlanywhere
             units = case db_type
-            when :mssql
+            when :mssql, :sqlanywhere
               MSSQL_DURATION_UNITS
             when :h2
               H2_DURATION_UNITS
@@ -122,7 +124,7 @@ module Sequel
             end
             false
           else
-            raise NotImplemented, "date arithmetic is not implemented on #{db.database_type}"
+            raise Error, "date arithmetic is not implemented on #{db.database_type}"
           end
 
           if cast
@@ -174,7 +176,7 @@ module Sequel
         else
           h = Hash.new(0)
           interval.parts.each{|unit, value| h[unit] += value}
-          {}.merge(h)
+          Hash[h]
         end
       end
 

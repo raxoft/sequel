@@ -17,26 +17,15 @@
 #
 #   Sequel.sqlite('blog.db'){|db| puts db[:users].count} 
 #
-# Sequel currently adds methods to the Array, Hash, String and Symbol classes by
-# default.  You can either require 'sequel/no_core_ext' or set the
-# +SEQUEL_NO_CORE_EXTENSIONS+ constant or environment variable before requiring
-# sequel to have # Sequel not add methods to those classes.
-#
-# For a more expanded introduction, see the {README}[link:files/README_rdoc.html].
-# For a quicker introduction, see the {cheat sheet}[link:files/doc/cheat_sheet_rdoc.html].
+# For a more expanded introduction, see the {README}[rdoc-ref:README.rdoc].
+# For a quicker introduction, see the {cheat sheet}[rdoc-ref:doc/cheat_sheet.rdoc].
 module Sequel
   @convert_two_digit_years = true
   @datetime_class = Time
-  @empty_array_handle_nulls = true
-  @virtual_row_instance_eval = true
-  @require_thread = nil
-  
-  # Mutex used to protect file loading/requireing
-  @require_mutex = Mutex.new
-  
+
   # Whether Sequel is being run in single threaded mode
   @single_threaded = false
-  
+
   class << self
     # Sequel converts two digit years in <tt>Date</tt>s and <tt>DateTime</tt>s by default,
     # so 01/02/03 is interpreted at January 2nd, 2003, and 12/13/99 is interpreted
@@ -59,50 +48,6 @@ module Sequel
     # they often implement them differently (e.g. + using seconds on +Time+ and
     # days on +DateTime+).
     attr_accessor :datetime_class
-
-    # Sets whether or not to attempt to handle NULL values correctly when given
-    # an empty array.  By default:
-    #
-    #   DB[:a].filter(:b=>[])
-    #   # SELECT * FROM a WHERE (b != b)
-    #   DB[:a].exclude(:b=>[])
-    #   # SELECT * FROM a WHERE (b = b)
-    #
-    # However, some databases (e.g. MySQL) will perform very poorly
-    # with this type of query.  You can set this to false to get the
-    # following behavior:
-    #
-    #   DB[:a].filter(:b=>[])
-    #   # SELECT * FROM a WHERE 1 = 0
-    #   DB[:a].exclude(:b=>[])
-    #   # SELECT * FROM a WHERE 1 = 1
-    # 
-    # This may not handle NULLs correctly, but can be much faster on
-    # some databases.
-    attr_accessor :empty_array_handle_nulls
-
-    # For backwards compatibility, has no effect.
-    attr_accessor :virtual_row_instance_eval
-    
-    # Alias to the standard version of require
-    alias k_require require
-
-    private
-
-    # Make thread safe requiring reentrant to prevent deadlocks.
-    def check_requiring_thread
-      return yield if @single_threaded
-      t = Thread.current
-      return(yield) if @require_thread == t
-      @require_mutex.synchronize do
-        begin
-          @require_thread = t 
-          yield
-        ensure
-          @require_thread = nil
-        end
-      end
-    end
   end
 
   # Returns true if the passed object could be a specifier of conditions, false otherwise.
@@ -119,11 +64,14 @@ module Sequel
     when Hash
       true
     when Array
-      !obj.empty? && !obj.is_a?(SQL::ValueList) && obj.all?{|i| (Array === i) && (i.length == 2)}
+      !obj.empty? && !obj.is_a?(SQL::ValueList) && obj.all?{|i| i.is_a?(Array) && (i.length == 2)}
     else
       false
     end
   end
+
+  # Frozen hash used as the default options hash for most options.
+  OPTS = {}.freeze
 
   # Creates a new database object based on the supplied connection string
   # and optional arguments.  The specified scheme determines the database
@@ -136,13 +84,24 @@ module Sequel
   #   DB = Sequel.connect('postgres://user:password@host:port/database_name')
   #   DB = Sequel.connect('sqlite:///blog.db', :max_connections=>10)
   #
+  # You can also pass a single options hash:
+  #
+  #   DB = Sequel.connect(:adapter=>'sqlite', :database=>'./blog.db')
+  #
   # If a block is given, it is passed the opened +Database+ object, which is
   # closed when the block exits.  For example:
   #
   #   Sequel.connect('sqlite://blog.db'){|db| puts db[:users].count}  
-  # 
-  # For details, see the {"Connecting to a Database" guide}[link:files/doc/opening_databases_rdoc.html].
-  # To set up a master/slave or sharded database connection, see the {"Master/Slave Databases and Sharding" guide}[link:files/doc/sharding_rdoc.html].
+  #
+  # If a block is not given, a reference to this database will be held in
+  # <tt>Sequel::DATABASES</tt> until it is removed manually.  This is by
+  # design, and used by <tt>Sequel::Model</tt> to pick the default
+  # database.  It is recommended to pass a block if you do not want the
+  # resulting Database object to remain in memory until the process
+  # terminates.
+  #
+  # For details, see the {"Connecting to a Database" guide}[rdoc-ref:doc/opening_databases.rdoc].
+  # To set up a master/slave or sharded database connection, see the {"Master/Slave Databases and Sharding" guide}[rdoc-ref:doc/sharding.rdoc].
   def self.connect(*args, &block)
     Database.connect(*args, &block)
   end
@@ -152,7 +111,7 @@ module Sequel
   def self.core_extensions?
     false
   end
-  
+
   # Convert the +exception+ to the given class.  The given class should be
   # <tt>Sequel::Error</tt> or a subclass.  Returns an instance of +klass+ with
   # the message and backtrace of +exception+.
@@ -175,7 +134,7 @@ module Sequel
   #   Sequel.extension(:schema_dumper)
   #   Sequel.extension(:pagination, :query)
   def self.extension(*extensions)
-    extensions.each{|e| tsk_require "sequel/extensions/#{e}"}
+    extensions.each{|e| Kernel.require "sequel/extensions/#{e}"}
   end
   
   # Set the method to call on identifiers going into the database.  This affects
@@ -192,7 +151,7 @@ module Sequel
   def self.identifier_input_method=(value)
     Database.identifier_input_method = value
   end
-  
+
   # Set the method to call on identifiers coming out of the database.  This affects
   # the literalization of identifiers by calling this method on them when they are
   # retrieved from the database.  Sequel downcases identifiers retrieved for most
@@ -209,12 +168,24 @@ module Sequel
     Database.identifier_output_method = value
   end
 
+  # The exception classed raised if there is an error parsing JSON.
+  # This can be overridden to use an alternative json implementation.
+  def self.json_parser_error_class
+    JSON::ParserError
+  end
+
+  # Convert given object to json and return the result.
+  # This can be overridden to use an alternative json implementation.
+  def self.object_to_json(obj, *args)
+    obj.to_json(*args)
+  end
+
   # Parse the string as JSON and return the result.
-  # This is solely for internal use, it should not be used externally.
-  def self.parse_json(json) # :nodoc:
+  # This can be overridden to use an alternative json implementation.
+  def self.parse_json(json)
     JSON.parse(json, :create_additions=>false)
   end
-  
+
   # Set whether to quote identifiers for all databases by default. By default,
   # Sequel quotes identifiers in all SQL strings, so to turn that off:
   #
@@ -235,7 +206,7 @@ module Sequel
       end
     end
   end
-  
+
   # Require all given +files+ which should be in the same or a subdirectory of
   # this file.  If a +subdir+ is given, assume all +files+ are in that subdir.
   # This is used to ensure that the files loaded are from the same version of
@@ -243,7 +214,7 @@ module Sequel
   def self.require(files, subdir=nil)
     Array(files).each{|f| super("#{File.dirname(__FILE__).untaint}/#{"#{subdir}/" if subdir}#{f}")}
   end
-  
+
   # Set whether Sequel is being used in single threaded mode. By default,
   # Sequel uses a thread-safe connection pool, which isn't as fast as the
   # single threaded connection pool, and also has some additional thread
@@ -259,6 +230,7 @@ module Sequel
   COLUMN_REF_RE1 = /\A((?:(?!__).)+)__((?:(?!___).)+)___(.+)\z/.freeze
   COLUMN_REF_RE2 = /\A((?:(?!___).)+)___(.+)\z/.freeze
   COLUMN_REF_RE3 = /\A((?:(?!__).)+)__(.+)\z/.freeze
+  SPLIT_SYMBOL_CACHE = {}
 
   # Splits the symbol into three parts.  Each part will
   # either be a string or nil.
@@ -266,16 +238,20 @@ module Sequel
   # For columns, these parts are the table, column, and alias.
   # For tables, these parts are the schema, table, and alias.
   def self.split_symbol(sym)
-    case s = sym.to_s
-    when COLUMN_REF_RE1
-      [$1, $2, $3]
-    when COLUMN_REF_RE2
-      [nil, $1, $2]
-    when COLUMN_REF_RE3
-      [$1, $2, nil]
-    else
-      [nil, s, nil]
+    unless v = Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym]}
+      v = case s = sym.to_s
+      when COLUMN_REF_RE1
+        [$1.freeze, $2.freeze, $3.freeze].freeze
+      when COLUMN_REF_RE2
+        [nil, $1.freeze, $2.freeze].freeze
+      when COLUMN_REF_RE3
+        [$1.freeze, $2.freeze, nil].freeze
+      else
+        [nil, s.freeze, nil].freeze
+      end
+      Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym] = v}
     end
+    v
   end
 
   # Converts the given +string+ into a +Date+ object.
@@ -332,7 +308,7 @@ module Sequel
   else
     # Yield directly to the block.  You don't need to synchronize
     # access on MRI because the GVL makes certain methods atomic.
-    def self.synchronize(&block)
+    def self.synchronize
       yield
     end
   end
@@ -360,31 +336,21 @@ module Sequel
   # to uncommit the changes on DB3.  For that kind of support, you need to
   # have two-phase commit/prepared transactions (which Sequel supports on
   # some databases).
-  def self.transaction(dbs, opts={}, &block)
+  def self.transaction(dbs, opts=OPTS, &block)
     unless opts[:rollback]
       rescue_rollback = true
-      opts = opts.merge(:rollback=>:reraise)
+      opts = Hash[opts].merge!(:rollback=>:reraise)
     end
     pr = dbs.reverse.inject(block){|bl, db| proc{db.transaction(opts, &bl)}}
     if rescue_rollback
       begin
         pr.call
-      rescue Sequel::Rollback => e
+      rescue Sequel::Rollback
         nil
       end
     else
       pr.call
     end
-  end
-
-  # Same as Sequel.require, but wrapped in a mutex in order to be thread safe.
-  def self.ts_require(*args)
-    check_requiring_thread{require(*args)}
-  end
-  
-  # Same as Kernel.require, but wrapped in a mutex in order to be thread safe.
-  def self.tsk_require(*args)
-    check_requiring_thread{k_require(*args)}
   end
 
   # If the supplied block takes a single argument,
@@ -403,25 +369,27 @@ module Sequel
       block.call(vr)
     end  
   end
-  
+
   ### Private Class Methods ###
 
   # Helper method that the database adapter class methods that are added to Sequel via
   # metaprogramming use to parse arguments.
-  def self.adapter_method(adapter, *args, &block) # :nodoc:
-    raise(::Sequel::Error, "Wrong number of arguments, 0-2 arguments valid") if args.length > 2
-    opts = {:adapter=>adapter.to_sym}
-    opts[:database] = args.shift if args.length >= 1 && !(args[0].is_a?(Hash))
-    if Hash === (arg = args[0])
-      opts.merge!(arg)
-    elsif !arg.nil?
+  def self.adapter_method(adapter, *args, &block)
+    options = args.last.is_a?(Hash) ? args.pop : {}
+    opts = {:adapter => adapter.to_sym}
+    opts[:database] = args.shift if args.first.is_a?(String)
+    if args.any?
       raise ::Sequel::Error, "Wrong format of arguments, either use (), (String), (Hash), or (String, Hash)"
     end
-    connect(opts, &block)
+
+    connect(opts.merge(options), &block)
   end
 
   # Method that adds a database adapter class method to Sequel that calls
   # Sequel.adapter_method.
+  #
+  # Do not call this method with untrusted input, as that can result in
+  # arbitrary code execution.
   def self.def_adapter_method(*adapters) # :nodoc:
     adapters.each do |adapter|
       instance_eval("def #{adapter}(*args, &block); adapter_method('#{adapter}', *args, &block) end", __FILE__, __LINE__)
@@ -429,13 +397,8 @@ module Sequel
   end
 
   private_class_method :adapter_method, :def_adapter_method
-  
-  require(%w"sql connection_pool exceptions dataset database timezones ast_transformer version")
-  if !defined?(::SEQUEL_NO_CORE_EXTENSIONS) && !ENV.has_key?('SEQUEL_NO_CORE_EXTENSIONS')
-  # :nocov:
-    extension(:core_extensions)
-  # :nocov:
-  end
+
+  require(%w"deprecated sql connection_pool exceptions dataset database timezones ast_transformer version")
 
   # Add the database adapter class methods to Sequel via metaprogramming
   def_adapter_method(*Database::ADAPTERS)

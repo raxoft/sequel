@@ -34,6 +34,7 @@ module Sequel
       # mock adapters for specific database types.
       SHARED_ADAPTERS = {
         'access'=>'Access',
+        'cubrid'=>'Cubrid',
         'db2'=>'DB2',
         'firebird'=>'Firebird',
         'informix'=>'Informix',
@@ -41,6 +42,7 @@ module Sequel
         'mysql'=>'MySQL',
         'oracle'=>'Oracle',
         'postgres'=>'Postgres',
+        'sqlanywhere'=>'SqlAnywhere',
         'sqlite'=>'SQLite'
       }
 
@@ -49,7 +51,7 @@ module Sequel
       SHARED_ADAPTER_SETUP = {
         'postgres' => lambda do |db|
           db.instance_eval do
-            @server_version = 90103
+            @server_version = 90400
             initialize_postgres_adapter
           end
           db.extend(Module.new do
@@ -67,9 +69,19 @@ module Sequel
             @primary_key_sequences = {}
           end
         end,
+        'mysql' => lambda do |db|
+          db.instance_eval do
+            @server_version = 50617
+          end
+        end,
         'mssql' => lambda do |db|
           db.instance_eval do
-            @server_version = 10000000
+            @server_version = 11000000
+          end
+        end,
+        'sqlite' => lambda do |db|
+          db.instance_eval do
+            @sqlite_version = 30804
           end
         end
       }
@@ -131,35 +143,6 @@ module Sequel
       # Mock the server version, useful when using the shared adapters
       attr_accessor :server_version
 
-      # Additional options supported:
-      #
-      # :autoid :: Call #autoid= with the value
-      # :columns :: Call #columns= with the value
-      # :fetch ::  Call #fetch= with the value
-      # :numrows :: Call #numrows= with the value
-      # :extend :: A module the object is extended with.
-      # :sqls :: The array to store the SQL queries in.
-      def initialize(opts={})
-        super
-        opts = @opts
-        @sqls = opts[:sqls] || []
-        if mod_name = SHARED_ADAPTERS[opts[:host]]
-          @shared_adapter = true
-          require "sequel/adapters/shared/#{opts[:host]}"
-          extend Sequel.const_get(mod_name)::DatabaseMethods
-          extend_datasets Sequel.const_get(mod_name)::DatasetMethods
-          if pr = SHARED_ADAPTER_SETUP[opts[:host]]
-            pr.call(self)
-          end
-        end
-        self.autoid = opts[:autoid]
-        self.columns = opts[:columns]
-        self.fetch = opts[:fetch]
-        self.numrows = opts[:numrows]
-        extend(opts[:extend]) if opts[:extend]
-        sqls
-      end
-
       # Return a related Connection option connecting to the given shard.
       def connect(server)
         Connection.new(self, server, server_opts(server))
@@ -171,18 +154,18 @@ module Sequel
       # Store the sql used for later retrieval with #sqls, and return
       # the appropriate value using either the #autoid, #fetch, or
       # #numrows methods.
-      def execute(sql, opts={}, &block)
+      def execute(sql, opts=OPTS, &block)
         synchronize(opts[:server]){|c| _execute(c, sql, opts, &block)} 
       end
       alias execute_ddl execute
 
       # Store the sql used, and return the value of the #numrows method.
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         execute(sql, opts.merge(:meth=>:numrows))
       end
 
       # Store the sql used, and return the value of the #autoid method.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         execute(sql, opts.merge(:meth=>:autoid))
       end
 
@@ -215,7 +198,7 @@ module Sequel
         end
       end
 
-      def _execute(c, sql, opts={}, &block)
+      def _execute(c, sql, opts=OPTS, &block)
         sql += " -- args: #{opts[:arguments].inspect}" if opts[:arguments]
         sql += " -- #{@opts[:append]}" if @opts[:append]
         sql += " -- #{c.server.is_a?(Symbol) ? c.server : c.server.inspect}" if c.server != :default
@@ -295,6 +278,36 @@ module Sequel
         _nextres(v, sql, 0)
       end
 
+      # Additional options supported:
+      #
+      # :autoid :: Call #autoid= with the value
+      # :columns :: Call #columns= with the value
+      # :fetch ::  Call #fetch= with the value
+      # :numrows :: Call #numrows= with the value
+      # :extend :: A module the object is extended with.
+      # :sqls :: The array to store the SQL queries in.
+      def adapter_initialize
+        opts = @opts
+        @sqls = opts[:sqls] || []
+        if mod_name = SHARED_ADAPTERS[opts[:host]]
+          @shared_adapter = true
+          require "sequel/adapters/shared/#{opts[:host]}"
+          extend Sequel.const_get(mod_name)::DatabaseMethods
+          extend_datasets Sequel.const_get(mod_name)::DatasetMethods
+          if pr = SHARED_ADAPTER_SETUP[opts[:host]]
+            pr.call(self)
+          end
+        else
+          @shared_adapter = false
+        end
+        self.autoid = opts[:autoid]
+        self.columns = opts[:columns]
+        self.fetch = opts[:fetch]
+        self.numrows = opts[:numrows]
+        extend(opts[:extend]) if opts[:extend]
+        sqls
+      end
+
       def columns(ds, sql, cs=@columns)
         case cs
         when Array
@@ -361,15 +374,15 @@ module Sequel
 
       private
 
-      def execute(sql, opts={}, &block)
+      def execute(sql, opts=OPTS, &block)
         super(sql, opts.merge(:dataset=>self), &block)
       end
 
-      def execute_dui(sql, opts={}, &block)
+      def execute_dui(sql, opts=OPTS, &block)
         super(sql, opts.merge(:dataset=>self), &block)
       end
 
-      def execute_insert(sql, opts={}, &block)
+      def execute_insert(sql, opts=OPTS, &block)
         super(sql, opts.merge(:dataset=>self), &block)
       end
     end

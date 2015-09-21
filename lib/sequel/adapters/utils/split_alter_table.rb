@@ -24,13 +24,21 @@ module Sequel::Database::SplitAlterTable
         modified_columns << op[:name] unless modified_columns.include?(op[:name])
         modified_columns << op[:new_name] unless modified_columns.include?(op[:new_name])
       end
+      if split_alter_table_op?(op)
+        op_groups << []
+      end
       op_groups.last << op
     end
 
-    op_groups.each do |ops|
-      next if ops.empty?
-      alter_table_sql_list(name, ops).each{|sql| execute_ddl(sql)}
+    op_groups.each do |opgs|
+      next if opgs.empty?
+      alter_table_sql_list(name, opgs).each{|sql| execute_ddl(sql)}
       remove_cached_schema(name)
     end
+  end
+
+  # Whether the given alter table op should start a new group.
+  def split_alter_table_op?(op)
+    false
   end
 end

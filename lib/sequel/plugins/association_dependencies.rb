@@ -29,12 +29,12 @@ module Sequel
       DEPENDENCE_ACTIONS = [:delete, :destroy, :nullify]
 
       # Initialize the association_dependencies hash for this model.
-      def self.apply(model, hash={})
+      def self.apply(model, hash=OPTS)
         model.instance_eval{@association_dependencies = {:before_delete=>[], :before_destroy=>[], :before_nullify=>[], :after_delete=>[], :after_destroy=>[]}}
       end
 
       # Call add_association_dependencies with any dependencies given in the plugin call.
-      def self.configure(model, hash={})
+      def self.configure(model, hash=OPTS)
         model.add_association_dependencies(hash) unless hash.empty?
       end
 
@@ -71,13 +71,7 @@ module Sequel
           end
         end
 
-        # Copy the current model object's association_dependencies into the subclass.
-        def inherited(subclass)
-          super
-          ad = association_dependencies.dup
-          ad.keys.each{|k| ad[k] = ad[k].dup}
-          subclass.instance_variable_set(:@association_dependencies, ad)
-        end
+        Plugins.inherited_instance_variables(self, :@association_dependencies=>:hash_dup)
       end
 
       module InstanceMethods

@@ -1,6 +1,10 @@
 module Sequel
+  require 'adapters/utils/emulate_offset_with_reverse_and_count'
+
   module Access
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       # Access uses type :access as the database_type
       def database_type
         :access
@@ -8,7 +12,7 @@ module Sequel
 
       # Doesn't work, due to security restrictions on MSysObjects
       #def tables
-      #  from(:MSysObjects).filter(:Type=>1, :Flags=>0).select_map(:Name).map{|x| x.to_sym}
+      #  from(:MSysObjects).filter(:Type=>1, :Flags=>0).select_map(:Name).map(&:to_sym)
       #end
       
       # Access doesn't support renaming tables from an SQL query,
@@ -25,13 +29,8 @@ module Sequel
 
       private
 
-      def alter_table_op_sql(table, op)
-        case op[:op]
-        when :set_column_type
-          "ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
-        else
-          super
-        end
+      def alter_table_set_column_type_sql(table, op)
+        "ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
       end
 
       # Access doesn't support CREATE TABLE AS, it only supports SELECT INTO.
@@ -84,7 +83,11 @@ module Sequel
     end
   
     module DatasetMethods
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'select distinct limit columns into from join where group order having compounds')
+      include(Module.new do
+        Dataset.def_sql_method(self, :select, %w'select distinct limit columns into from join where group order having compounds')
+      end)
+      include EmulateOffsetWithReverseAndCount
+
       DATE_FORMAT = '#%Y-%m-%d#'.freeze
       TIMESTAMP_FORMAT = '#%Y-%m-%d %H:%M:%S#'.freeze
       TOP = " TOP ".freeze
@@ -104,6 +107,7 @@ module Sequel
       TIME_FUNCTION = 'Time()'.freeze
       CAST_TYPES = {String=>:CStr, Integer=>:CLng, Date=>:CDate, Time=>:CDate, DateTime=>:CDate, Numeric=>:CDec, BigDecimal=>:CDec, File=>:CStr, Float=>:CDbl, TrueClass=>:CBool, FalseClass=>:CBool}
 
+      EMULATED_FUNCTION_MAP = {:char_length=>:len}
       EXTRACT_MAP = {:year=>"'yyyy'", :month=>"'m'", :day=>"'d'", :hour=>"'h'", :minute=>"'n'", :second=>"'s'"}
       COMMA = Dataset::COMMA
       DATEPART_OPEN = "datepart(".freeze
@@ -181,15 +185,6 @@ module Sequel
         clone(:from=>@opts[:from] + [table])
       end
 
-      def emulated_function_sql_append(sql, f)
-        case f.f
-        when :char_length
-          literal_append(sql, SQL::Function.new(:len, f.args.first))
-        else
-          super
-        end
-      end
-      
       # Access uses [] to escape metacharacters, instead of backslashes.
       def escape_like(string)
         string.gsub(/[\\*#?\[]/){|m| "[#{m}]"}
@@ -198,6 +193,11 @@ module Sequel
       # Specify a table for a SELECT ... INTO query.
       def into(table)
         clone(:into => table)
+      end
+
+      # Access does not support derived column lists.
+      def supports_derived_column_lists?
+        false
       end
 
       # Access doesn't support INTERSECT or EXCEPT
@@ -288,11 +288,6 @@ module Sequel
       # Access uses [] for quoting identifiers
       def quoted_identifier_append(sql, v)
         sql << BRACKET_OPEN << v.to_s << BRACKET_CLOSE
-      end
-
-      # Access requires the limit clause come before other clauses
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
       end
     end
   end

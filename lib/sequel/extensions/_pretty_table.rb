@@ -6,6 +6,7 @@
 #
 #   Sequel.extension :_pretty_table
 
+#
 module Sequel
   module PrettyTable
     # Prints nice-looking plain-text tables via puts
@@ -22,7 +23,7 @@ module Sequel
 
     # Return the string that #print will print via puts.
     def self.string(records, columns = nil) # records is an array of hashes
-      columns ||= records.first.keys.sort_by{|x|x.to_s}
+      columns ||= records.first.keys.sort_by(&:to_s)
       sizes = column_sizes(records, columns)
       sep_line = separator_line(columns, sizes)
 
@@ -39,12 +40,12 @@ module Sequel
       sizes = Hash.new {0}
       columns.each do |c|
         s = c.to_s.size
-        sizes[c.to_sym] = s if s > sizes[c.to_sym]
+        sizes[c] = s if s > sizes[c]
       end
       records.each do |r|
         columns.each do |c|
           s = r[c].to_s.size
-          sizes[c.to_sym] = s if s > sizes[c.to_sym]
+          sizes[c] = s if s > sizes[c]
         end
       end
       sizes
@@ -60,7 +61,7 @@ module Sequel
       case v
       when Bignum, Fixnum
         "%#{size}d" % v
-      when Float
+      when Float, BigDecimal
         "%#{size}g" % v
       else
         "%-#{size}s" % v.to_s

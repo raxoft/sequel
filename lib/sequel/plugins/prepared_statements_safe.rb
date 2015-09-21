@@ -33,17 +33,8 @@ module Sequel
         # that can be created is 2^N (where N is the number of free columns).
         attr_reader :prepared_statements_column_defaults
         
-        def inherited(subclass)
-          super
-          subclass.instance_variable_set(:@prepared_statements_column_defaults, @prepared_statements_column_defaults) if @prepared_statements_column_defaults && !subclass.prepared_statements_column_defaults
-        end
-
-        # Set the column defaults to use when creating on the subclass.
-        def set_dataset(*)
-          x = super
-          set_prepared_statements_column_defaults
-          x
-        end
+        Plugins.inherited_instance_variables(self, :@prepared_statements_column_defaults=>:dup)
+        Plugins.after_set_dataset(self, :set_prepared_statements_column_defaults)
 
         private
 
@@ -66,14 +57,14 @@ module Sequel
         # of free columns.
         def before_create
           if v = model.prepared_statements_column_defaults
-            set_values(v.merge(values))
+            @values = Hash[v].merge!(values)
           end
           super
         end
 
         # Always do a full save of all columns to reduce the number of prepared
         # statements that can be used.
-        def save_changes(opts={})
+        def save_changes(opts=OPTS)
           save(opts) || false if modified?
         end
       end

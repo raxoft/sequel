@@ -12,18 +12,21 @@ toolkit for Ruby.
   two-phase commit, transaction isolation, master/slave
   configurations, and database sharding.
 * Sequel currently has adapters for ADO, Amalgalite, CUBRID,
-  DataObjects, DB2, DBI, Firebird, IBM_DB, Informix, JDBC, MySQL,
-  Mysql2, ODBC, OpenBase, Oracle, PostgreSQL, SQLite3, Swift, and
-  TinyTDS.
+  DataObjects, IBM_DB, JDBC, MySQL, Mysql2, ODBC, Oracle,
+  PostgreSQL, SQLAnywhere, SQLite3, Swift, and TinyTDS.
 
 == Resources
 
-* {Website}[http://sequel.rubyforge.org]
-* {Blog}[http://sequel.heroku.com]
-* {Source code}[http://github.com/jeremyevans/sequel]
-* {Bug tracking}[http://github.com/jeremyevans/sequel/issues]
-* {Google group}[http://groups.google.com/group/sequel-talk]
-* {RDoc}[http://sequel.rubyforge.org/rdoc]
+Website :: http://sequel.jeremyevans.net
+RDoc Documentation :: http://sequel.jeremyevans.net/rdoc
+Source Code :: https://github.com/jeremyevans/sequel
+Bug tracking (GitHub Issues) :: http://github.com/jeremyevans/sequel/issues
+Discussion Forum (sequel-talk Google Group) :: http://groups.google.com/group/sequel-talk
+IRC Channel (#sequel) :: irc://irc.freenode.net/sequel
+
+If you have questions about how to use Sequel, please ask on the
+sequel-talk Google Group or IRC.  Only use the the bug tracker to report
+bugs in Sequel, not to ask for help on using Sequel.
 
 To check out the source code:
   
@@ -35,11 +38,10 @@ If you have any comments or suggestions please post to the Google group.
 
 == Installation
 
-  sudo gem install sequel
+  gem install sequel
   
 == A Short Example
 
-  require 'rubygems'
   require 'sequel'
   
   DB = Sequel.sqlite # memory database
@@ -71,7 +73,7 @@ Sequel includes an IRB console for quick access to databases (usually referred t
 
 You get an IRB session with the database object stored in DB.
 
-In addition to providing an IRB shell (the default behavior), bin/sequel also has support for migrating databases, dumping schema migrations, and copying databases.  See the {bin/sequel guide}[link:files/doc/bin_sequel_rdoc.html] for more details.
+In addition to providing an IRB shell (the default behavior), bin/sequel also has support for migrating databases, dumping schema migrations, and copying databases.  See the {bin/sequel guide}[rdoc-ref:doc/bin_sequel.rdoc] for more details.
 
 == An Introduction
 
@@ -121,6 +123,15 @@ You can also specify optional parameters, such as the connection pool size, or l
 You can specify a block to connect, which will disconnect from the database after it completes:
 
   Sequel.connect('postgres://user:password@host:port/database_name'){|db| db[:posts].delete}
+
+=== The DB convention
+
+Throughout Sequel's documentation, you will see the +DB+ constant used to refer to the Sequel::Database instance you create.
+This reflects the recommendation that for an app with a single Sequel::Database instance, the Sequel convention is to store
+the instance in the +DB+ constant.  This is just a convention, it's not required, but it is recommended.
+
+Note that some frameworks that use Sequel may create the Sequel::Database instance for you, and you might not know
+how to access it.  In most cases, you can access the Sequel::Database instance through <tt>Sequel::Model.db</tt>.
 
 === Arbitrary SQL queries
 
@@ -211,6 +222,8 @@ Sequel also accepts expressions:
   
   my_posts = posts.where{stamp > Date.today << 1}
   # WHERE stamp > '2010-06-14'
+  my_posts = posts.where{stamp =~ Date.today}
+  # WHERE stamp = '2010-07-14'
   
 Some adapters will also let you specify Regexps:
 
@@ -242,7 +255,13 @@ After filtering, you can retrieve the matching records by using any of the retri
 
   my_posts.each{|row| p row}
   
-See the {Dataset Filtering}[link:files/doc/dataset_filtering_rdoc.html] file for more details.
+See the {Dataset Filtering}[rdoc-ref:doc/dataset_filtering.rdoc] file for more details.
+
+=== Security
+
+Designing apps with security in mind is a best practice.
+Please read the {Security Guide}[rdoc-ref:doc/security.rdoc] for details on security
+issues that you should be aware of when using Sequel.
 
 === Summarizing Records
 
@@ -299,7 +318,7 @@ You can also specify descending order:
 
 === Core Extensions
 
-Note the use of <tt>Sequel.desc(:stamp)</tt> in the above example.  Much of Sequel's DSL uses this style, calling methods on the Sequel module that return SQL expression objects.  Sequel also ships with a {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]) that integrates Sequel's DSL better into the ruby language, allowing you to write:
+Note the use of <tt>Sequel.desc(:stamp)</tt> in the above example.  Much of Sequel's DSL uses this style, calling methods on the Sequel module that return SQL expression objects.  Sequel also ships with a {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc]) that integrates Sequel's DSL better into the ruby language, allowing you to write:
 
   :stamp.desc
 
@@ -357,7 +376,7 @@ Updating records in the table is done with +update+:
 
 You can reference table columns when choosing what values to set:
 
-  posts.where{|o| o.stamp < Date.today - 7}.update(:backup_number => :backup_number + 1)
+  posts.where{|o| o.stamp < Date.today - 7}.update(:backup_number => Sequel.+(:backup_number, 1))
   # UPDATE posts SET backup_number = backup_number + 1 WHERE stamp < '2010-07-07'
 
 As with +delete+, +update+ affects all rows in the dataset, so +where+ first,
@@ -411,17 +430,11 @@ You can then do anything you like with the dataset:
   # ON order_items.item_id = items.id
   # WHERE order_items.order_id = 1234
   
-=== Graphing Datasets
-
-When retrieving records from joined datasets, you get the results in a single hash, which is subject to clobbering if you have columns with the same name in multiple tables:
-
-  DB[:items].join(:order_items, :item_id => :id).first
-  => {:id=>order_items.id, :item_id=>order_items.item_id}
-
-Using +graph+, you can split the result hashes into subhashes, one per join:
-
-  DB[:items].graph(:order_items, :item_id => :id).first
-  => {:items=>{:id=>items.id}, :order_items=>{:id=>order_items.id, :item_id=>order_items.item_id}}
+Note that the default selection in Sequel is <tt>*</tt>, which includes all columns
+in all joined tables.  Because Sequel returns results as a hash keyed by column name
+symbols, if any tables have columns with the same name, this will clobber the columns
+in the returned hash.  So when joining you are usually going to want to change the
+selection using +select+, +select_all+, and/or +select_append+.
 
 == Column references in Sequel
 
@@ -458,7 +471,7 @@ to select from a qualified table:
 
 === Identifier aliases
 
-You can also alias identifiers by using the triple undersecore special notation <tt>:column___alias</tt> or <tt>:table__column___alias</tt>:
+You can also alias identifiers by using the triple underscore special notation <tt>:column___alias</tt> or <tt>:table__column___alias</tt>:
 
   items.literal(:price___p)
   # price AS p
@@ -484,6 +497,10 @@ Model classes are defined as regular Ruby classes inheriting from <tt>Sequel::Mo
   DB = Sequel.connect('sqlite://blog.db')
   class Post < Sequel::Model
   end
+
+When a model class is created, it parses the schema in the table from the database, and
+automatically sets up accessor methods for all of the columns in the table (Sequel::Model
+implements the active record pattern).
 
 Sequel model classes assume that the table name is an underscored plural of the class name:
 
@@ -529,9 +546,9 @@ A single model instance can also be fetched by specifying a condition:
   post = Post[:title => 'hello world']
   post = Post.first{num_comments < 10}
 
-=== Iterating over records
+=== Acts like a dataset
 
-A model class lets you iterate over subsets of records by proxying many methods to the underlying dataset. This means that you can use most of the +Dataset+ API to create customized queries that return model instances, e.g.:
+A model class forwards many methods to the underlying dataset. This means that you can use most of the +Dataset+ API to create customized queries that return model instances, e.g.:
 
   Post.where(:category => 'ruby').each{|post| p post}
 
@@ -556,21 +573,25 @@ If the record's attributes names are not valid columns in the model's dataset (m
   post[:id] #=> 123
   post[:title] #=> 'hello world'
 
-You can also modify record values using attribute setters, the <tt>[]=</tt> method, or the +set+ method:
+You can also modify record values using attribute setters or the <tt>[]=</tt> method.
+
 
   post.title = 'hey there'
-  # or 
   post[:title] = 'hey there'
-  # or 
-  post.set(:title=>'hey there')
 
 That will just change the value for the object, it will not update the row in the database.  To update the database row, call the +save+ method:
 
   post.save
 
-You can modify record values and save the changes to the object in a single method call using the +update+ method:
+=== Mass assignment
 
-  post.update(:title => 'hey there')
+You can also set the values for multiple columns in a single method call, using one of the mass-assignment methods.  See the {mass assignment guide}[rdoc-ref:doc/mass_assignment.rdoc] for details.  For example +set+ updates the model's column values without saving:
+
+  post.set(:title=>'hey there', :updated_by=>'foo')
+
+and +update+ updates the model's column values and then saves the changes to the database:
+
+  post.update(:title => 'hey there', :updated_by=>'foo')
 
 === Creating new records
 
@@ -619,23 +640,25 @@ You can delete individual records by calling +delete+ or +destroy+. The only dif
   post.delete # => bypasses hooks
   post.destroy # => runs hooks
 
-Records can also be deleted en-masse by calling <tt>Model.delete</tt> and <tt>Model.destroy</tt>. As stated above, you can specify filters for the deleted records:
+Records can also be deleted en-masse by calling <tt>delete</tt> and <tt>destroy</tt> on the model's dataset. As stated above, you can specify filters for the deleted records:
 
   Post.where(:category => 32).delete # => bypasses hooks
   Post.where(:category => 32).destroy # => runs hooks
 
-Please note that if <tt>Model.destroy</tt> is called, each record is deleted 
-separately, but <tt>Model.delete</tt> deletes all matching records with a single 
+Please note that if <tt>destroy</tt> is called, each record is deleted 
+separately, but <tt>delete</tt> deletes all matching records with a single 
 SQL query.
 
 === Associations
 
-Associations are used in order to specify relationships between model classes that reflect relationships between tables in the database, which are usually specified using foreign keys.  You specify model associations via the +many_to_one+, +one_to_one+, +one_to_many+, and +many_to_many+ class methods:
+Associations are used in order to specify relationships between model classes that reflect relationships between tables in the database, which are usually specified using foreign keys.  You specify model associations via class methods:
 
   class Post < Sequel::Model
     many_to_one :author
     one_to_many :comments
+    one_to_one :first_comment, :class=>:Comment, :order=>:id
     many_to_many :tags
+    one_through_one :first_tag, :class=>:Tag, :order=>:name, :right_key=>:tag_id
   end
 
 +many_to_one+ and +one_to_one+ create a getter and setter for each model object:
@@ -736,21 +759,31 @@ You can dynamically customize eager loads for both +eager+ and +eager_graph+ whi
   # Eagerly load only replies containing 'foo', and the person and tags for those replies
   Post.eager(:replies=>{proc{|ds| ds.where(Sequel.like(text, '%foo%'))}=>[:person, :tags]}).all
 
+=== Joining with Associations
+
+You can use the association_join method to add a join to the model's dataset based on the assocation:
+
+  Post.association_join(:author)
+  # SELECT * FROM posts
+  # INNER JOIN authors AS author ON (author.id = posts.author_id)
+
+This comes with variants for different join types:
+
+  Post.association_left_join(:replies)
+  # SELECT * FROM posts
+  # LEFT JOIN replies ON (replies.post_id = posts.id)
+
+Similar to the eager loading methods, you can use multiple associations and nested associations:
+
+  Post.association_join(:author, :replies=>:person).all
+  # SELECT * FROM posts
+  # INNER JOIN authors AS author ON (author.id = posts.author_id)
+  # INNER JOIN replies ON (replies.post_id = posts.id)
+  # INNER JOIN people AS person ON (person.id = replies.person_id)
+
 === Extending the underlying dataset
 
-The obvious way to add table-wide logic is to define class methods to the model class definition. That way you can define subsets of the underlying dataset, change the ordering, or perform actions on multiple records:
-
-  class Post < Sequel::Model
-    def self.posts_with_few_comments
-      where{num_comments < 30}
-    end
-
-    def self.clean_posts_with_few_comments
-      posts_with_few_comments.delete
-    end
-  end
-
-You can also implement table-wide logic by defining methods on the dataset using +dataset_module+:
+The recommended way to implement table-wide logic by defining methods on the dataset using +dataset_module+:
 
   class Post < Sequel::Model
     dataset_module do
@@ -764,7 +797,7 @@ You can also implement table-wide logic by defining methods on the dataset using
     end
   end
 
-This is the recommended way of implementing table-wide operations, and allows you to have access to your model API from filtered datasets as well:
+This allows you to have access to your model API from filtered datasets as well:
 
   Post.where(:category => 'ruby').clean_posts_with_few_comments
 
@@ -779,7 +812,7 @@ Sequel models also provide a +subset+ class method that creates a dataset method
 
 You can define a +validate+ method for your model, which +save+
 will check before attempting to save the model in the database.
-If an attribute of the model isn't valid, you should add a error
+If an attribute of the model isn't valid, you should add an error
 message for that attribute to the model object's +errors+. If an
 object has any errors added by the validate method, +save+ will
 raise an error or return false depending on how it is configured
@@ -792,4 +825,3 @@ raise an error or return false depending on how it is configured
       errors.add(:written_on, "should be in the past") if written_on >= Time.now
     end
   end
-

@@ -62,13 +62,16 @@ module Sequel
         # Example of usage:
         #
         #  class MyModel
-        #   define_hook :before_move_to
-        #   before_move_to(:check_move_allowed){|o| o.allow_move?}
+        #   add_hook_type :before_move_to
+        #   before_move_to(:check_move_allowed, &:allow_move?)
         #   def move_to(there)
         #     return if before_move_to == false
         #     # move MyModel object to there
         #   end
         #  end
+        #
+        # Do not call this method with untrusted input, as that can result in
+        # arbitrary code execution.
         def add_hook_type(*hooks)
           Model::HOOKS.concat(hooks)
           hooks.each do |hook|
@@ -88,12 +91,7 @@ module Sequel
           @hooks[hook].each{|k,v| yield v}
         end
 
-        # Make a copy of the current class's hooks for the subclass.
-        def inherited(subclass)
-          hooks = subclass.instance_variable_set(:@hooks, {}) 
-          instance_variable_get(:@hooks).each{|k,v| hooks[k] = v.dup}
-          super
-        end
+        Plugins.inherited_instance_variables(self, :@hooks=>:hash_dup)
     
         private
     

@@ -27,115 +27,14 @@ module Sequel
     # to :integer.
     DECIMAL_TYPE_RE = /number|numeric|decimal/io
     
-    # Contains procs keyed on sub adapter type that extend the
+    # Contains procs keyed on subadapter type that extend the
     # given database object so it supports the correct database type.
-    DATABASE_SETUP = {:postgresql=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/postgresql'
-        db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::Postgres::Dataset
-        JDBC.load_gem(:Postgres)
-        org.postgresql.Driver
-      end,
-      :mysql=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/mysql'
-        db.extend(Sequel::JDBC::MySQL::DatabaseMethods)
-        db.extend_datasets Sequel::MySQL::DatasetMethods
-        JDBC.load_gem(:MySQL)
-        com.mysql.jdbc.Driver
-      end,
-      :sqlite=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/sqlite'
-        db.extend(Sequel::JDBC::SQLite::DatabaseMethods)
-        db.extend_datasets Sequel::SQLite::DatasetMethods
-        db.set_integer_booleans
-        JDBC.load_gem(:SQLite3)
-        org.sqlite.JDBC
-      end,
-      :oracle=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/oracle'
-        db.extend(Sequel::JDBC::Oracle::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::Oracle::Dataset
-        Java::oracle.jdbc.driver.OracleDriver
-      end,
-      :sqlserver=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/sqlserver'
-        db.extend(Sequel::JDBC::SQLServer::DatabaseMethods)
-        db.extend_datasets Sequel::MSSQL::DatasetMethods
-        db.send(:set_mssql_unicode_strings)
-        com.microsoft.sqlserver.jdbc.SQLServerDriver
-      end,
-      :jtds=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/jtds'
-        db.extend(Sequel::JDBC::JTDS::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::JTDS::Dataset
-        db.send(:set_mssql_unicode_strings)
-        JDBC.load_gem(:JTDS)
-        Java::net.sourceforge.jtds.jdbc.Driver
-      end,
-      :h2=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/h2'
-        db.extend(Sequel::JDBC::H2::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::H2::Dataset
-        JDBC.load_gem(:H2)
-        org.h2.Driver
-      end,
-      :hsqldb=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/hsqldb'
-        db.extend(Sequel::JDBC::HSQLDB::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::HSQLDB::Dataset
-        JDBC.load_gem(:HSQLDB)
-        org.hsqldb.jdbcDriver
-      end,
-      :derby=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/derby'
-        db.extend(Sequel::JDBC::Derby::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::Derby::Dataset
-        JDBC.load_gem(:Derby)
-        org.apache.derby.jdbc.EmbeddedDriver
-      end,
-      :as400=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/as400'
-        db.extend(Sequel::JDBC::AS400::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::AS400::Dataset
-        com.ibm.as400.access.AS400JDBCDriver
-      end,
-      :"informix-sqli"=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/informix'
-        db.extend(Sequel::JDBC::Informix::DatabaseMethods)
-        db.extend_datasets Sequel::Informix::DatasetMethods
-        com.informix.jdbc.IfxDriver
-      end,
-      :db2=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/db2'
-        db.extend(Sequel::JDBC::DB2::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::DB2::Dataset
-        com.ibm.db2.jcc.DB2Driver
-      end,
-      :firebirdsql=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/firebird'
-        db.extend(Sequel::JDBC::Firebird::DatabaseMethods)
-        db.extend_datasets Sequel::Firebird::DatasetMethods
-        org.firebirdsql.jdbc.FBDriver
-      end,
-      :jdbcprogress=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/progress'
-        db.extend(Sequel::JDBC::Progress::DatabaseMethods)
-        db.extend_datasets Sequel::Progress::DatasetMethods
-        com.progress.sql.jdbc.JdbcProgressDriver
-      end,
-      :cubrid=>proc do |db|
-        Sequel.ts_require 'adapters/jdbc/cubrid'
-        db.extend(Sequel::JDBC::Cubrid::DatabaseMethods)
-        db.extend_datasets Sequel::Cubrid::DatasetMethods
-        Java::cubrid.jdbc.driver.CUBRIDDriver
-      end
-    }
+    DATABASE_SETUP = {}
     
-    # Allowing loading the necessary JDBC support via a gem, which
-    # works for PostgreSQL, MySQL, and SQLite.
+    # Allow loading the necessary JDBC support via a gem.
     def self.load_gem(name)
       begin
-        Sequel.tsk_require "jdbc/#{name.to_s.downcase}"
+        require "jdbc/#{name.to_s.downcase}"
       rescue LoadError
         # jdbc gem not used, hopefully the user has the .jar in their CLASSPATH
       else
@@ -143,6 +42,98 @@ module Sequel
           jdbc_module = ::Jdbc.const_get(name) # e.g. Jdbc::SQLite3
           jdbc_module.load_driver if jdbc_module.respond_to?(:load_driver)
         end
+      end
+    end
+
+    # Attempt to load the JDBC driver class, which should be specified as a string
+    # containing the driver class name (which JRuby should autoload).
+    # Note that the string is evaled, so this method is not safe to call with
+    # untrusted input.
+    # Raise a Sequel::AdapterNotFound if evaluating the class name raises a NameError.
+    def self.load_driver(drv, gem=nil)
+      load_gem(gem) if gem
+      eval drv
+    rescue NameError
+      raise Sequel::AdapterNotFound, "#{drv} not loaded#{", try installing jdbc-#{gem.to_s.downcase} gem" if gem}"
+    end
+
+    class TypeConvertor
+      %w'Boolean Float Double Int Long Short'.each do |meth|
+        class_eval("def #{meth}(r, i) v = r.get#{meth}(i); v unless r.wasNull end", __FILE__, __LINE__)
+      end
+      %w'Object Array String Time Date Timestamp BigDecimal Blob Bytes Clob'.each do |meth|
+        class_eval("def #{meth}(r, i) r.get#{meth}(i) end", __FILE__, __LINE__)
+      end
+      def RubyTime(r, i)
+        if v = r.getTime(i)
+          Sequel.string_to_time("#{v.to_string}.#{sprintf('%03i', v.getTime.divmod(1000).last)}")
+        end
+      end
+      def RubyDate(r, i)
+        if v = r.getDate(i)
+          Date.civil(v.getYear + 1900, v.getMonth + 1, v.getDate)
+        end
+      end
+      def RubyTimestamp(r, i)
+        if v = r.getTimestamp(i)
+          Sequel.database_to_application_timestamp([v.getYear + 1900, v.getMonth + 1, v.getDate, v.getHours, v.getMinutes, v.getSeconds, v.getNanos])
+        end
+      end
+      def RubyBigDecimal(r, i)
+        if v = r.getBigDecimal(i)
+          BigDecimal.new(v.to_string)
+        end
+      end
+      def RubyBlob(r, i)
+        if v = r.getBytes(i)
+          Sequel::SQL::Blob.new(String.from_java_bytes(v))
+        end
+      end
+      def RubyClob(r, i)
+        if v = r.getClob(i)
+          v.getSubString(1, v.length)
+        end
+      end
+
+      INSTANCE = new
+      o = INSTANCE
+      MAP = Hash.new(o.method(:Object))
+      types = Java::JavaSQL::Types
+
+      {
+        :ARRAY => :Array,
+        :BOOLEAN => :Boolean,
+        :CHAR => :String,
+        :DOUBLE => :Double,
+        :FLOAT => :Double,
+        :INTEGER => :Int,
+        :LONGNVARCHAR => :String,
+        :LONGVARCHAR => :String,
+        :NCHAR => :String,
+        :REAL => :Float,
+        :SMALLINT => :Short,
+        :TINYINT => :Short,
+        :VARCHAR => :String,
+      }.each do |type, meth|
+        MAP[types.const_get(type)] = o.method(meth) 
+      end
+      BASIC_MAP = MAP.dup
+
+      {
+        :BINARY => :Blob,
+        :BLOB => :Blob,
+        :CLOB => :Clob,
+        :DATE => :Date,
+        :DECIMAL => :BigDecimal,
+        :LONGVARBINARY => :Blob,
+        :NCLOB => :Clob,
+        :NUMERIC => :BigDecimal,
+        :TIME => :Time,
+        :TIMESTAMP => :Timestamp,
+        :VARBINARY => :Blob,
+      }.each do |type, meth|
+        BASIC_MAP[types.const_get(type)] = o.method(meth) 
+        MAP[types.const_get(type)] = o.method(:"Ruby#{meth}") 
       end
     end
 
@@ -154,7 +145,7 @@ module Sequel
       # The type of database we are connecting to
       attr_reader :database_type
       
-      # The Java database driver we are using
+      # The Java database driver we are using (should be a Java class)
       attr_reader :driver
       
       # Whether to convert some Java types to ruby types when retrieving rows.
@@ -162,27 +153,19 @@ module Sequel
       # fetching rows.
       attr_accessor :convert_types
 
-      # Call the DATABASE_SETUP proc directly after initialization,
-      # so the object always uses sub adapter specific code.  Also,
-      # raise an error immediately if the connection doesn't have a
-      # uri, since JDBC requires one.
-      def initialize(opts)
-        super
-        @connection_prepared_statements = {}
-        @connection_prepared_statements_mutex = Mutex.new
-        @convert_types = typecast_value_boolean(@opts.fetch(:convert_types, true))
-        raise(Error, "No connection string specified") unless uri
-        
-        resolved_uri = jndi? ? get_uri_from_jndi : uri
+      # The fetch size to use for JDBC Statement objects created by this database.
+      # By default, this is nil so a fetch size is not set explicitly.
+      attr_accessor :fetch_size
 
-        if match = /\Ajdbc:([^:]+)/.match(resolved_uri) and prok = DATABASE_SETUP[match[1].to_sym]
-          @driver = prok.call(self)
-        end        
-      end
-      
+      # Map of JDBC type ids to callable objects that return appropriate ruby values.
+      attr_reader :type_convertor_map
+
+      # Map of JDBC type ids to callable objects that return appropriate ruby or java values.
+      attr_reader :basic_type_convertor_map
+
       # Execute the given stored procedure with the give name. If a block is
       # given, the stored procedure should return rows.
-      def call_sproc(name, opts = {})
+      def call_sproc(name, opts = OPTS)
         args = opts[:args] || []
         sql = "{call #{name}(#{args.map{'?'}.join(',')})}"
         synchronize(opts[:server]) do |conn|
@@ -221,6 +204,7 @@ module Sequel
           args.concat([opts[:user], opts[:password]]) if opts[:user] && opts[:password]
           begin
             JavaSQL::DriverManager.setLoginTimeout(opts[:login_timeout]) if opts[:login_timeout]
+            raise StandardError, "skipping regular connection" if opts[:jdbc_properties]
             JavaSQL::DriverManager.getConnection(*args)
           rescue JavaSQL::SQLException, NativeException, StandardError => e
             raise e unless driver
@@ -255,12 +239,15 @@ module Sequel
       
       # Execute the given SQL.  If a block is given, if should be a SELECT
       # statement or something else that returns rows.
-      def execute(sql, opts={}, &block)
+      def execute(sql, opts=OPTS, &block)
         return call_sproc(sql, opts, &block) if opts[:sproc]
         return execute_prepared_statement(sql, opts, &block) if [Symbol, Dataset].any?{|c| sql.is_a?(c)}
         synchronize(opts[:server]) do |conn|
           statement(conn) do |stmt|
             if block
+              if size = fetch_size
+                stmt.setFetchSize(size)
+              end
               yield log_yield(sql){stmt.executeQuery(sql)}
             else
               case opts[:type]
@@ -268,7 +255,7 @@ module Sequel
                 log_yield(sql){stmt.execute(sql)}
               when :insert
                 log_yield(sql){execute_statement_insert(stmt, sql)}
-                last_insert_id(conn, opts.merge(:stmt=>stmt))
+                last_insert_id(conn, Hash[opts].merge!(:stmt=>stmt))
               else
                 log_yield(sql){stmt.executeUpdate(sql)}
               end
@@ -280,24 +267,44 @@ module Sequel
 
       # Execute the given DDL SQL, which should not return any
       # values or rows.
-      def execute_ddl(sql, opts={})
-        execute(sql, {:type=>:ddl}.merge(opts))
+      def execute_ddl(sql, opts=OPTS)
+        opts = Hash[opts]
+        opts[:type] = :ddl
+        execute(sql, opts)
       end
       
       # Execute the given INSERT SQL, returning the last inserted
       # row id.
-      def execute_insert(sql, opts={})
-        execute(sql, {:type=>:insert}.merge(opts))
+      def execute_insert(sql, opts=OPTS)
+        opts = Hash[opts]
+        opts[:type] = :insert
+        execute(sql, opts)
       end
-      
-      # Use the JDBC metadata to get the index information for the table.
-      def indexes(table, opts={})
+
+      # Use the JDBC metadata to get a list of foreign keys for the table.
+      def foreign_key_list(table, opts=OPTS)
         m = output_identifier_meth
-        im = input_identifier_meth
-        schema, table = schema_and_table(table)
-        schema ||= opts[:schema]
-        schema = im.call(schema) if schema
-        table = im.call(table)
+        schema, table = metadata_schema_and_table(table, opts)
+        foreign_keys = {}
+        metadata(:getImportedKeys, nil, schema, table) do |r|
+          if fk = foreign_keys[r[:fk_name]]
+            fk[:columns] << [r[:key_seq], m.call(r[:fkcolumn_name])]
+            fk[:key] << [r[:key_seq], m.call(r[:pkcolumn_name])]
+          elsif r[:fk_name]
+            foreign_keys[r[:fk_name]] = {:name=>m.call(r[:fk_name]), :columns=>[[r[:key_seq], m.call(r[:fkcolumn_name])]], :table=>m.call(r[:pktable_name]), :key=>[[r[:key_seq], m.call(r[:pkcolumn_name])]]}
+          end
+        end
+        foreign_keys.values.each do |fk|
+          [:columns, :key].each do |k|
+            fk[k] = fk[k].sort.map{|_, v| v}
+          end
+        end
+      end
+
+      # Use the JDBC metadata to get the index information for the table.
+      def indexes(table, opts=OPTS)
+        m = output_identifier_meth
+        schema, table = metadata_schema_and_table(table, opts)
         indexes = {}
         metadata(:getIndexInfo, nil, schema, table, false, true) do |r|
           next unless name = r[:column_name]
@@ -314,7 +321,7 @@ module Sequel
       end
       
       # All tables in this database
-      def tables(opts={})
+      def tables(opts=OPTS)
         get_tables('TABLE', opts)
       end
       
@@ -322,19 +329,42 @@ module Sequel
       # using the :uri, :url, or :database options.  You don't
       # need to worry about this if you use Sequel.connect
       # with the JDBC connectrion strings.
-      def uri(opts={})
+      def uri(opts=OPTS)
         opts = @opts.merge(opts)
         ur = opts[:uri] || opts[:url] || opts[:database]
         ur =~ /^\Ajdbc:/ ? ur : "jdbc:#{ur}"
       end
 
       # All views in this database
-      def views(opts={})
+      def views(opts=OPTS)
         get_tables('VIEW', opts)
       end
 
       private
          
+      # Call the DATABASE_SETUP proc directly after initialization,
+      # so the object always uses sub adapter specific code.  Also,
+      # raise an error immediately if the connection doesn't have a
+      # uri, since JDBC requires one.
+      def adapter_initialize
+        @connection_prepared_statements = {}
+        @connection_prepared_statements_mutex = Mutex.new
+        @fetch_size = @opts[:fetch_size] ? typecast_value_integer(@opts[:fetch_size]) : default_fetch_size
+        @convert_types = typecast_value_boolean(@opts.fetch(:convert_types, true))
+        raise(Error, "No connection string specified") unless uri
+        
+        resolved_uri = jndi? ? get_uri_from_jndi : uri
+        setup_type_convertor_map_early
+
+        @driver = if (match = /\Ajdbc:([^:]+)/.match(resolved_uri)) && (prok = Sequel::Database.load_adapter(match[1].to_sym, :map=>DATABASE_SETUP, :subdir=>'jdbc'))
+          prok.call(self)
+        else
+          @opts[:driver]
+        end        
+
+        setup_type_convertor_map
+      end
+      
       # Yield the native prepared statements hash for the given connection
       # to the block in a thread-safe manner.
       def cps_sync(conn, &block)
@@ -373,9 +403,9 @@ module Sequel
       # statement, use that statement instead of creating another.
       # Otherwise, prepare a new statement for the connection, bind the
       # variables, and execute it.
-      def execute_prepared_statement(name, opts={})
+      def execute_prepared_statement(name, opts=OPTS)
         args = opts[:arguments]
-        if Dataset === name
+        if name.is_a?(Dataset)
           ps = name
           name = ps.prepared_statement_name
         else
@@ -388,6 +418,9 @@ module Sequel
           else
             log_yield("CLOSE #{name}"){cps[1].close} if cps
             cps = log_yield("PREPARE#{" #{name}:" if name} #{sql}"){prepare_jdbc_statement(conn, sql, opts)}
+            if size = fetch_size
+              cps.setFetchSize(size)
+            end
             cps_sync(conn){|cpsh| cpsh[name] = [sql, cps]} if name
           end
           i = 0
@@ -407,7 +440,7 @@ module Sequel
                 log_yield(msg, args){cps.execute}
               when :insert
                 log_yield(msg, args){execute_prepared_statement_insert(cps)}
-                last_insert_id(conn, opts.merge(:prepared=>true, :stmt=>cps))
+                last_insert_id(conn, Hash[opts].merge!(:prepared=>true, :stmt=>cps))
               else
                 log_yield(msg, args){cps.executeUpdate}
               end
@@ -429,6 +462,12 @@ module Sequel
       def execute_statement_insert(stmt, sql)
         stmt.executeUpdate(sql)
       end
+
+      # The default fetch size to use for statements.  Nil by default, so that the
+      # default for the JDBC driver is used.
+      def default_fetch_size
+        nil
+      end
       
       # Gets the connection from JNDI.
       def get_connection_from_jndi
@@ -448,7 +487,10 @@ module Sequel
       def get_tables(type, opts)
         ts = []
         m = output_identifier_meth
-        metadata(:getTables, nil, nil, nil, [type].to_java(:string)){|h| ts << m.call(h[:table_name])}
+        if schema = opts[:schema]
+          schema = schema.to_s
+        end
+        metadata(:getTables, nil, schema, nil, [type].to_java(:string)){|h| ts << m.call(h[:table_name])}
         ts
       end
 
@@ -497,6 +539,16 @@ module Sequel
         end
       end
 
+      # Return the schema and table suitable for use with metadata queries.
+      def metadata_schema_and_table(table, opts)
+        im = input_identifier_meth(opts[:dataset])
+        schema, table = schema_and_table(table)
+        schema ||= opts[:schema]
+        schema = im.call(schema) if schema
+        table = im.call(table)
+        [schema, table]
+      end
+      
       # Created a JDBC prepared statement on the connection with the given SQL.
       def prepare_jdbc_statement(conn, sql, opts)
         conn.prepareStatement(sql)
@@ -547,26 +599,38 @@ module Sequel
       end
       
       # Parse the table schema for the given table.
-      def schema_parse_table(table, opts={})
+      def schema_parse_table(table, opts=OPTS)
         m = output_identifier_meth(opts[:dataset])
-        im = input_identifier_meth(opts[:dataset])
-        ds = dataset
-        schema, table = schema_and_table(table)
-        schema ||= opts[:schema]
-        schema = im.call(schema) if schema
-        table = im.call(table)
+        schema, table = metadata_schema_and_table(table, opts)
         pks, ts = [], []
         metadata(:getPrimaryKeys, nil, schema, table) do |h|
           next if schema_parse_table_skip?(h, schema)
           pks << h[:column_name]
         end
+        schemas = []
         metadata(:getColumns, nil, schema, table, nil) do |h|
           next if schema_parse_table_skip?(h, schema)
-          s = {:type=>schema_column_type(h[:type_name]), :db_type=>h[:type_name], :default=>(h[:column_def] == '' ? nil : h[:column_def]), :allow_null=>(h[:nullable] != 0), :primary_key=>pks.include?(h[:column_name]), :column_size=>h[:column_size], :scale=>h[:decimal_digits]}
+          s = {
+            :type=>schema_column_type(h[:type_name]),
+            :db_type=>h[:type_name],
+            :default=>(h[:column_def] == '' ? nil : h[:column_def]),
+            :allow_null=>(h[:nullable] != 0),
+            :primary_key=>pks.include?(h[:column_name]),
+            :column_size=>h[:column_size],
+            :scale=>h[:decimal_digits]
+          }
+          if s[:primary_key]
+            s[:auto_increment] = h[:is_autoincrement] == "YES"
+          end
+          s[:max_length] = s[:column_size] if s[:type] == :string
           if s[:db_type] =~ DECIMAL_TYPE_RE && s[:scale] == 0
             s[:type] = :integer
           end
+          schemas << h[:table_schem] unless schemas.include?(h[:table_schem])
           ts << [m.call(h[:column_name]), s]
+        end
+        if schemas.length > 1
+          raise Error, 'Schema parsing in the jdbc adapter resulted in columns being returned for a table with the same name in multiple schemas.  Please explicitly qualify your table with a schema.'
         end
         ts
       end
@@ -575,6 +639,17 @@ module Sequel
       # parsing the schema.
       def schema_parse_table_skip?(h, schema)
         h[:table_schem] == 'INFORMATION_SCHEMA'
+      end
+
+      # Called after loading subadapter-specific code, overridable by subadapters.
+      def setup_type_convertor_map
+      end
+
+      # Called before loading subadapter-specific code, necessary so that subadapter initialization code
+      # that runs queries works correctly.  This cannot be overriding in subadapters,
+      def setup_type_convertor_map_early
+        @type_convertor_map = TypeConvertor::MAP.merge(Java::JavaSQL::Types::TIMESTAMP=>timestamp_convertor)
+        @basic_type_convertor_map = TypeConvertor::BASIC_MAP
       end
 
       # Yield a new statement object, and ensure that it is closed before returning.
@@ -586,6 +661,16 @@ module Sequel
       ensure
         stmt.close if stmt
       end
+
+      # A conversion proc for timestamp columns.  This is used to make sure timestamps are converted using the
+      # correct timezone.
+      def timestamp_convertor
+        lambda do |r, i|
+          if v = r.getTimestamp(i)
+            to_application_timestamp([v.getYear + 1900, v.getMonth + 1, v.getDate, v.getHours, v.getMinutes, v.getSeconds, v.getNanos])
+          end
+        end
+      end
     end
     
     class Dataset < Sequel::Dataset
@@ -593,53 +678,37 @@ module Sequel
 
       Database::DatasetClass = self
       
-      # Use JDBC PreparedStatements instead of emulated ones.  Statements
-      # created using #prepare are cached at the connection level to allow
-      # reuse.  This also supports bind variables by using unnamed
-      # prepared statements created using #call.
-      module PreparedStatementMethods
-        include Sequel::Dataset::UnnumberedArgumentMapper
-        
-        private
-        
-        # Execute the prepared SQL using the stored type and
-        # arguments derived from the hash passed to call.
-        def execute(sql, opts={}, &block)
-          super(self, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts={}, &block)
-          super(self, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts={}, &block)
-          super(self, {:arguments=>bind_arguments, :type=>:insert}.merge(opts), &block)
-        end
+      PreparedStatementMethods = prepared_statements_module(
+        "sql = self; opts = Hash[opts]; opts[:arguments] = bind_arguments",
+        Sequel::Dataset::UnnumberedArgumentMapper,
+        %w"execute execute_dui") do
+          private
+
+          # Same as execute, explicit due to intricacies of alias and super.
+          def execute_insert(sql, opts=OPTS)
+            sql = self
+            opts = Hash[opts]
+            opts[:arguments] = bind_arguments
+            opts[:type] = :insert
+            super
+          end
       end
       
-      # Use JDBC CallableStatements to execute stored procedures.  Only supported
-      # if the underlying database has stored procedure support.
-      module StoredProcedureMethods
-        include Sequel::Dataset::StoredProcedureMethods
-        
-        private
-        
-        # Execute the database stored procedure with the stored arguments.
-        def execute(sql, opts={}, &block)
-          super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts={}, &block)
-          super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts={}, &block)
-          super(@sproc_name, {:args=>@sproc_args, :sproc=>true, :type=>:insert}.merge(opts), &block)
-        end
+      StoredProcedureMethods = prepared_statements_module(
+        "sql = @sproc_name; opts = Hash[opts]; opts[:args] = @sproc_args; opts[:sproc] = true",
+        Sequel::Dataset::StoredProcedureMethods,
+        %w"execute execute_dui") do
+          private
+
+          # Same as execute, explicit due to intricacies of alias and super.
+          def execute_insert(sql, opts=OPTS)
+            sql = @sproc_name
+            opts = Hash[opts]
+            opts[:args] = @sproc_args
+            opts[:sproc] = true
+            opts[:type] = :insert
+            super
+          end
       end
       
       # Whether to convert some Java types to ruby types when retrieving rows.
@@ -664,165 +733,67 @@ module Sequel
         end
         ps
       end
+
+      # Set the fetch size on JDBC ResultSets created from this dataset.
+      def with_fetch_size(size)
+        clone(:fetch_size=>size)
+      end
       
       private
 
-      # Cache Java class constants to speed up lookups
-      JAVA_SQL_TIMESTAMP    = Java::JavaSQL::Timestamp
-      JAVA_SQL_TIME         = Java::JavaSQL::Time
-      JAVA_SQL_DATE         = Java::JavaSQL::Date
-      JAVA_SQL_BLOB         = Java::JavaSQL::Blob
-      JAVA_SQL_CLOB         = Java::JavaSQL::Clob
-      JAVA_BUFFERED_READER  = Java::JavaIo::BufferedReader
-      JAVA_BIG_DECIMAL      = Java::JavaMath::BigDecimal
-      JAVA_BYTE_ARRAY       = Java::byte[]
-      JAVA_UUID             = Java::JavaUtil::UUID
-
-      # Handle type conversions for common Java types.
-      class TYPE_TRANSLATOR
-        LF = "\n".freeze
-        def time(v) Sequel.string_to_time("#{v.to_string}.#{sprintf('%03i', v.getTime.divmod(1000).last)}") end
-        def date(v) Date.civil(v.getYear + 1900, v.getMonth + 1, v.getDate) end
-        def decimal(v) BigDecimal.new(v.to_string) end
-        def byte_array(v) Sequel::SQL::Blob.new(String.from_java_bytes(v)) end
-        def blob(v) Sequel::SQL::Blob.new(String.from_java_bytes(v.getBytes(1, v.length))) end
-        def clob(v) v.getSubString(1, v.length) end
-        def buffered_reader(v)
-          lines = ""
-          c = false
-          while(line = v.read_line) do
-            lines << LF if c
-            lines << line
-            c ||= true
-          end
-          lines
-        end
-        def uuid(v) v.to_string end
-      end
-      TYPE_TRANSLATOR_INSTANCE = tt = TYPE_TRANSLATOR.new
-
-      # Cache type translator methods so that duplicate Method
-      # objects are not created.
-      DECIMAL_METHOD = tt.method(:decimal)
-      TIME_METHOD = tt.method(:time)
-      DATE_METHOD = tt.method(:date)
-      BUFFERED_READER_METHOD = tt.method(:buffered_reader)
-      BYTE_ARRAY_METHOD = tt.method(:byte_array)
-      BLOB_METHOD = tt.method(:blob)
-      CLOB_METHOD = tt.method(:clob)
-      UUID_METHOD = tt.method(:uuid)
-
-      # Convert the given Java timestamp to an instance of Sequel.datetime_class.
-      def convert_type_timestamp(v)
-        db.to_application_timestamp([v.getYear + 1900, v.getMonth + 1, v.getDate, v.getHours, v.getMinutes, v.getSeconds, v.getNanos])
+      # Whether we should convert Java types to ruby types for this dataset.
+      def convert_types?
+        ct = @convert_types
+        ct.nil? ? db.convert_types : ct
       end
 
-      # Return a callable object that will convert any value of <tt>v</tt>'s
-      # class to a ruby object.  If no callable object can handle <tt>v</tt>'s
-      # class, return false so that the negative lookup is cached.
-      def convert_type_proc(v)
-        case v
-        when JAVA_BIG_DECIMAL
-          DECIMAL_METHOD
-        when JAVA_SQL_TIMESTAMP
-          method(:convert_type_timestamp)
-        when JAVA_SQL_TIME
-          TIME_METHOD
-        when JAVA_SQL_DATE
-          DATE_METHOD
-        when JAVA_BUFFERED_READER
-          BUFFERED_READER_METHOD
-        when JAVA_BYTE_ARRAY
-          BYTE_ARRAY_METHOD
-        when JAVA_SQL_BLOB
-          BLOB_METHOD
-        when JAVA_SQL_CLOB
-          CLOB_METHOD
-        when JAVA_UUID
-          UUID_METHOD
-        else
-          false
-        end
-      end
-      
       # Extend the dataset with the JDBC stored procedure methods.
       def prepare_extend_sproc(ds)
         ds.extend(StoredProcedureMethods)
       end
-      
-      # Split out from fetch rows to allow processing of JDBC result sets
-      # that don't come from issuing an SQL string.
-      def process_result_set(result, &block)
-        # get column names
-        meta = result.getMetaData
-        cols = []
-        i = 0
-        meta.getColumnCount.times{cols << [output_identifier(meta.getColumnLabel(i+=1)), i]}
-        columns = cols.map{|c| c.at(0)}
-        @columns = columns
-        ct = @convert_types
-        if (ct.nil? ? db.convert_types : ct)
-          cols.each{|c| c << nil}
-          process_result_set_convert(cols, result, &block)
-        else
-          process_result_set_no_convert(cols, result, &block)
-        end
-      ensure
-        result.close
+
+      # The type conversion proc to use for the given column number i,
+      # given the type conversion map and the ResultSetMetaData.
+      def type_convertor(map, meta, type, i)
+        map[type]
       end
 
-      # Use conversion procs to convert data retrieved
-      # from the database.  This has been optimized, the algorithm it uses
-      # is roughly, for each column value in each row:
-      # * check if the value is truthy (not false/nil)
-      # * if not truthy, return object
-      # * otherwise, see if a conversion method exists for
-      #   the column.  All columns start with a nil conversion proc,
-      #   since unlike other adapters, Sequel doesn't get the type of
-      #   the column when parsing the column metadata.
-      # * if a conversion proc is not false/nil, call it with the object
-      #   and return the result.
-      # * if a conversion proc has already been looked up and doesn't
-      #   exist (false value), return object.  
-      # * if a conversion proc hasn't been looked up yet (nil value),
-      #   call convert_type_proc to get the conversion method.  Cache
-      #   the result of as the column's conversion proc to speed up
-      #   later processing.  If the conversion proc exists, call it
-      #   and return the result, otherwise, return the object.
-      def process_result_set_convert(cols, result)
+      # The basic type conversion proc to use for the given column number i,
+      # given the type conversion map and the ResultSetMetaData.
+      #
+      # This is implemented as a separate method so that subclasses can
+      # override the methods separately.
+      def basic_type_convertor(map, meta, type, i)
+        map[type]
+      end
+
+      # Split out from fetch rows to allow processing of JDBC result sets
+      # that don't come from issuing an SQL string.
+      def process_result_set(result)
+        meta = result.getMetaData
+        if fetch_size = opts[:fetch_size]
+          result.setFetchSize(fetch_size)
+        end
+        cols = []
+        i = 0
+        convert = convert_types?
+        map = convert ? db.type_convertor_map : db.basic_type_convertor_map
+
+        meta.getColumnCount.times do
+          i += 1
+          cols << [output_identifier(meta.getColumnLabel(i)), i, convert ? type_convertor(map, meta, meta.getColumnType(i), i) : basic_type_convertor(map, meta, meta.getColumnType(i), i)]
+        end
+        @columns = cols.map{|c| c.at(0)}
+
         while result.next
           row = {}
-          cols.each do |n, i, p|
-            v = result.getObject(i)
-            row[n] = if v
-              if p
-                p.call(v)
-              elsif p.nil?
-                cols[i-1][2] = p = convert_type_proc(v)
-                if p
-                  p.call(v)
-                else
-                  v
-                end
-              else
-                v
-              end
-            else
-              v
-            end
+          cols.each do |n, j, pr|
+            row[n] = pr.call(result, j)
           end
           yield row
         end
-      end
-
-      # Yield rows without calling any conversion procs.  This
-      # may yield Java values and not ruby values.
-      def process_result_set_no_convert(cols, result)
-        while result.next
-          row = {}
-          cols.each{|n, i| row[n] = result.getObject(i)}
-          yield row
-        end
+      ensure
+        result.close
       end
     end
   end

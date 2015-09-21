@@ -12,6 +12,7 @@
 #
 #   Sequel.extension :eval_inspect
 
+#
 module Sequel
   module EvalInspect
     # Special case objects where inspect does not generally produce input
@@ -74,7 +75,7 @@ module Sequel
             Sequel.eval_inspect(send(arg))
           end
         end
-        "#{klass}.new(#{args.join(', ')})"
+        "#{klass}.#{inspect_new_method}(#{args.join(', ')})"
       end
 
       private
@@ -82,6 +83,11 @@ module Sequel
       # Which attribute values to use in the inspect string.
       def inspect_args
         self.class.comparison_attrs
+      end
+
+      # Use the new method by default for creating new objects.
+      def inspect_new_method
+        :new
       end
     end
 
@@ -127,9 +133,10 @@ module Sequel
     class Function
       private
 
-      # Function's initializer uses a splat for the function arguments.
-      def inspect_args
-        [:f, "*args"]
+      # Function uses a new! method for creating functions with options,
+      # since Function.new does not allow for an options hash.
+      def inspect_new_method
+        :new!
       end
     end
 
@@ -139,7 +146,7 @@ module Sequel
       # JoinOnClause's initializer takes the on argument as the first argument
       # instead of the last.
       def inspect_args
-        [:on, :join_type, :table, :table_alias] 
+        [:on, :join_type, :table_expr] 
       end
     end
 
@@ -149,7 +156,7 @@ module Sequel
       # JoinOnClause's initializer takes the using argument as the first argument
       # instead of the last.
       def inspect_args
-        [:using, :join_type, :table, :table_alias] 
+        [:using, :join_type, :table_expr] 
       end
     end
 

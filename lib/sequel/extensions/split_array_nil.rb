@@ -31,6 +31,7 @@
 #
 #   DB.extension(:split_array_nil)
 
+#
 module Sequel
   class Dataset
     module SplitArrayNil
@@ -42,7 +43,7 @@ module Sequel
       case op
       when :IN, :"NOT IN"
         vals = args.at(1)
-        if vals.is_a?(Array) && vals.any?{|v| v.nil?}
+        if vals.is_a?(Array) && vals.any?(&:nil?)
           cols = args.at(0)
           vals = vals.compact
           c = Sequel::SQL::BooleanExpression

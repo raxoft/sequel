@@ -1,10 +1,9 @@
 module Sequel
   module Plugins
-    # The association_pks plugin adds the association_pks and association_pks=
+    # The association_pks plugin adds association_pks and association_pks=
     # instance methods to the model class for each association added.  These
     # methods allow for easily returning the primary keys of the associated
-    # objects, and easily modifying the associated objects to set the primary
-    # keys to just the ones given:
+    # objects, and easily modifying which objects are associated:
     #
     #   Artist.one_to_many :albums
     #   artist = Artist[1]
@@ -21,6 +20,13 @@ module Sequel
     # not call any callbacks.  If you have any association callbacks,
     # you probably should not use the setter methods.
     #
+    # If an association uses the :delay_pks option, you can set the associated
+    # pks for new objects, and the setting will not be persisted until after the
+    # object has been created in the database.  Additionally, if an association
+    # uses the :delay_pks=>:all option, you can set the associated pks for existing
+    # objects, and the setting will not be persisted until after the object has
+    # been saved.
+    #
     # Usage:
     #
     #   # Make all model subclass *_to_many associations have association_pks
@@ -35,116 +41,73 @@ module Sequel
         private
 
         # Define a association_pks method using the block for the association reflection 
-        def def_association_pks_getter(opts, &block)
-          association_module_def(:"#{singularize(opts[:name])}_pks", opts, &block)
-        end
-
-        # Define a association_pks= method using the block for the association reflection,
-        # if the association is not read only.
-        def def_association_pks_setter(opts, &block)
-          association_module_def(:"#{singularize(opts[:name])}_pks=", opts, &block) unless opts[:read_only]
+        def def_association_pks_methods(opts)
+          association_module_def(:"#{singularize(opts[:name])}_pks", opts){_association_pks_getter(opts)}
+          association_module_def(:"#{singularize(opts[:name])}_pks=", opts){|pks| _association_pks_setter(opts, pks)} unless opts[:read_only]
         end
 
         # Add a getter that checks the join table for matching records and
         # a setter that deletes from or inserts into the join table.
         def def_many_to_many(opts)
           super
-          # Grab values from the reflection so that the hash lookup only needs to be
-          # done once instead of inside ever method call.
-          lk, lpk, rk = opts.values_at(:left_key, :left_primary_key, :right_key)
 
-          # Add 2 separate implementations of the getter method optimized for the
-          # composite and singular left key cases, and 4 separate implementations of the setter
-          # method optimized for each combination of composite and singular keys for both
-          # the left and right keys.
-          if lpk.is_a?(Array)
-            def_association_pks_getter(opts) do
+          return if opts[:type] == :one_through_one
+
+          # Grab values from the reflection so that the hash lookup only needs to be
+          # done once instead of inside every method call.
+          lk, lpk, rk = opts.values_at(:left_key, :left_primary_key, :right_key)
+          clpk = lpk.is_a?(Array)
+          crk = rk.is_a?(Array)
+
+          opts[:pks_getter] = if clpk
+            lambda do
               h = {}
-              lk.zip(lpk).each{|k, pk| h[k] = send(pk)}
+              lk.zip(lpk).each{|k, pk| h[k] = get_column_value(pk)}
               _join_table_dataset(opts).filter(h).select_map(rk)
             end
-
-            if rk.is_a?(Array)
-              def_association_pks_setter(opts) do |pks|
-                pks = convert_cpk_array(opts, pks)
-                checked_transaction do
-                  lpkv = lpk.map{|k| send(k)}
-                  ds = _join_table_dataset(opts).filter(lk.zip(lpkv))
-                  ds.exclude(rk=>pks).delete
-                  pks -= ds.select_map(rk)
-                  h = {}
-                  lk.zip(lpkv).each{|k, v| h[k] = v}
-                  pks.each do |pk|
-                    ih = h.dup
-                    rk.zip(pk).each{|k, v| ih[k] = v}
-                    ds.insert(ih)
-                  end
-                end
-              end
-            else
-              def_association_pks_setter(opts) do |pks|
-                pks = convert_pk_array(opts, pks)
-                checked_transaction do
-                  lpkv = lpk.map{|k| send(k)}
-                  ds = _join_table_dataset(opts).filter(lk.zip(lpkv))
-                  ds.exclude(rk=>pks).delete
-                  pks -= ds.select_map(rk)
-                  h = {}
-                  lk.zip(lpkv).each{|k, v| h[k] = v}
-                  pks.each do |pk|
-                    ds.insert(h.merge(rk=>pk))
-                  end
-                end
-              end
-            end
           else
-            def_association_pks_getter(opts) do
-              _join_table_dataset(opts).filter(lk=>send(lpk)).select_map(rk)
-            end
-
-            if rk.is_a?(Array)
-              def_association_pks_setter(opts) do |pks|
-                pks = convert_cpk_array(opts, pks)
-                checked_transaction do
-                  lpkv = send(lpk)
-                  ds = _join_table_dataset(opts).filter(lk=>lpkv)
-                  ds.exclude(rk=>pks).delete
-                  pks -= ds.select_map(rk)
-                  pks.each do |pk|
-                    h = {lk=>lpkv}
-                    rk.zip(pk).each{|k, v| h[k] = v}
-                    ds.insert(h)
-                  end
-                end
-              end
-            else
-              def_association_pks_setter(opts) do |pks|
-                pks = convert_pk_array(opts, pks)
-                checked_transaction do
-                  lpkv = send(lpk)
-                  ds = _join_table_dataset(opts).filter(lk=>lpkv)
-                  ds.exclude(rk=>pks).delete
-                  pks -= ds.select_map(rk)
-                  pks.each{|pk| ds.insert(lk=>lpkv, rk=>pk)}
-                end
-              end
+            lambda do
+              _join_table_dataset(opts).filter(lk=>get_column_value(lpk)).select_map(rk)
             end
           end
+
+          opts[:pks_setter] = lambda do |pks|
+            pks = send(crk ? :convert_cpk_array : :convert_pk_array, opts, pks)
+            checked_transaction do
+              if clpk
+                lpkv = lpk.map{|k| get_column_value(k)}
+                cond = lk.zip(lpkv)
+              else
+                lpkv = get_column_value(lpk)
+                cond = {lk=>lpkv}
+              end
+              ds = _join_table_dataset(opts).filter(cond)
+              ds.exclude(rk=>pks).delete
+              pks -= ds.select_map(rk)
+              lpkv = Array(lpkv)
+              key_array = crk ? pks.map{|pk| lpkv + pk} : pks.map{|pk| lpkv + [pk]}
+              key_columns = Array(lk) + Array(rk)
+              ds.import(key_columns, key_array)
+            end
+          end
+
+          def_association_pks_methods(opts)
         end
 
         # Add a getter that checks the association dataset and a setter
         # that updates the associated table.
         def def_one_to_many(opts)
           super
+
           return if opts[:type] == :one_to_one
 
           key = opts[:key]
 
-          def_association_pks_getter(opts) do
+          opts[:pks_getter] = lambda do
             send(opts.dataset_method).select_map(opts.associated_class.primary_key)
           end
 
-          def_association_pks_setter(opts) do |pks|
+          opts[:pks_setter] = lambda do |pks|
             primary_key = opts.associated_class.primary_key
 
             pks = if primary_key.is_a?(Array)
@@ -173,11 +136,58 @@ module Sequel
               ds.exclude(pkh).update(nh)
             end
           end
+
+          def_association_pks_methods(opts)
         end
       end
 
       module InstanceMethods
+        # After creating an object, if there are any saved association pks,
+        # call the related association pks setters.
+        def after_save
+          if assoc_pks = @_association_pks
+            assoc_pks.each do |name, pks|
+              instance_exec(pks, &model.association_reflection(name)[:pks_setter]) unless pks.empty?
+            end
+            @_association_pks = nil
+          end
+          super
+        end
+
+        # Clear the associated pks if explicitly refreshing.
+        def refresh
+          @_association_pks = nil
+          super
+        end
+
         private
+
+        # Return the primary keys of the associated objects.
+        # If the receiver is a new object, return any saved
+        # pks, or an empty array if no pks have been saved.
+        def _association_pks_getter(opts)
+          delay = opts[:delay_pks]
+          if new? && delay
+            (@_association_pks ||= {})[opts[:name]] ||= []
+          elsif delay == :always && @_association_pks && (objs = @_association_pks[opts[:name]])
+            objs
+          else
+            instance_exec(&opts[:pks_getter])
+          end
+        end
+
+        # Update which objects are associated to the receiver.
+        # If the receiver is a new object, save the pks
+        # so the update can happen after the received has been saved.
+        def _association_pks_setter(opts, pks)
+          delay = opts[:delay_pks]
+          if (new? && delay) || (delay == :always)
+            modified!
+            (@_association_pks ||= {})[opts[:name]] = pks
+          else
+            instance_exec(pks, &opts[:pks_setter])
+          end
+        end
 
         # If any of associated class's composite primary key column types is integer,
         # typecast the appropriate values to integer before using them.

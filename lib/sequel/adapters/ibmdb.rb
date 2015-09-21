@@ -25,7 +25,6 @@ module Sequel
       :time => ::Sequel.method(:string_to_time),
       :date => ::Sequel.method(:string_to_date)
     }
-    DB2_TYPES[:clob] = DB2_TYPES[:blob]
 
     # Wraps an underlying connection to DB2 using IBM_DB.
     class Connection
@@ -44,8 +43,13 @@ module Sequel
       end
 
       # Create the underlying IBM_DB connection.
-      def initialize(connection_string)
-        @conn = IBM_DB.connect(connection_string, '', '')
+      def initialize(connection_param)
+        @conn = if connection_param.class == String
+          IBM_DB.connect(connection_param, '', '')
+        else  # connect using catalog 
+          IBM_DB.connect(*connection_param)
+        end
+
         self.autocommit = true
         @prepared_statements = {}
       end
@@ -157,8 +161,14 @@ module Sequel
         IBM_DB.field_precision(@stmt, key)
       end
 
-      # Free the memory related to this result set.
+      # Free the memory related to this statement.
       def free
+        IBM_DB.free_stmt(@stmt)
+      end
+
+      # Free the memory related to this result set, only useful for prepared
+      # statements which have a different result set on every call.
+      def free_result
         IBM_DB.free_result(@stmt)
       end
 
@@ -175,42 +185,30 @@ module Sequel
 
       # Hash of connection procs for converting
       attr_reader :conversion_procs
-
-      def initialize(opts={})
-        super
-        @conversion_procs = DB2_TYPES.dup
-        @conversion_procs[:timestamp] = method(:to_application_timestamp)
-      end
-
-      # REORG the related table whenever it is altered.  This is not always
-      # required, but it is necessary for compatibilty with other Sequel
-      # code in many cases.
-      def alter_table(name, generator=nil)
-        res = super
-        reorg(name)
-        res
-      end
     
       # Create a new connection object for the given server.
       def connect(server)
         opts = server_opts(server)
-        
-        # use uncataloged connection so that host and port can be supported
-        connection_string = ( \
-            'Driver={IBM DB2 ODBC DRIVER};' \
-            "Database=#{opts[:database]};" \
-            "Hostname=#{opts[:host]};" \
-            "Port=#{opts[:port] || 50000};" \
-            'Protocol=TCPIP;' \
-            "Uid=#{opts[:user]};" \
-            "Pwd=#{opts[:password]};" \
-        )
 
-        Connection.new(connection_string)
+        connection_params = if opts[:host].nil? && opts[:port].nil? && opts[:database]
+          # use a cataloged connection
+          opts.values_at(:database, :user, :password)
+        else
+          # use uncataloged connection so that host and port can be supported
+          'Driver={IBM DB2 ODBC DRIVER};' \
+          "Database=#{opts[:database]};" \
+          "Hostname=#{opts[:host]};" \
+          "Port=#{opts[:port] || 50000};" \
+          'Protocol=TCPIP;' \
+          "Uid=#{opts[:user]};" \
+          "Pwd=#{opts[:password]};" \
+        end 
+
+        Connection.new(connection_params)
       end
 
       # Execute the given SQL on the database.
-      def execute(sql, opts={}, &block)
+      def execute(sql, opts=OPTS, &block)
         if sql.is_a?(Symbol)
           execute_prepared_statement(sql, opts, &block)
         else
@@ -222,14 +220,14 @@ module Sequel
 
       # Execute the given SQL on the database, returning the last inserted
       # identity value.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         synchronize(opts[:server]) do |c|
           if sql.is_a?(Symbol)
             execute_prepared_statement(sql, opts)
           else
             _execute(c, sql, opts)
           end
-          _execute(c, "SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1", opts){|stmt| i = stmt.fetch_array.first.to_i; stmt.free; i}
+          _execute(c, "SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1", opts){|stmt| i = stmt.fetch_array.first.to_i; i}
         end
       rescue Connection::Error => e
         raise_error(e)
@@ -251,45 +249,17 @@ module Sequel
             log_sql << sql
             log_sql << ")"
           end
-          stmt = log_yield(log_sql, args){conn.execute_prepared(ps_name, *args)}
-          if block_given?
-            begin
+          begin
+            stmt = log_yield(log_sql, args){conn.execute_prepared(ps_name, *args)}
+            if block_given?
               yield(stmt)
-            ensure
-              stmt.free
+            else  
+              stmt.affected
             end
-          else  
-            stmt.affected
+          ensure
+            stmt.free_result if stmt
           end
         end
-      end
-
-      # Convert smallint type to boolean if convert_smallint_to_bool is true
-      def schema_column_type(db_type)
-        if Sequel::IBMDB.convert_smallint_to_bool && db_type =~ /smallint/i 
-          :boolean
-        else
-          super
-        end
-      end
-
-      # On DB2, a table might need to be REORGed if you are testing existence
-      # of it.  This REORGs automatically if the database raises a specific
-      # error that indicates it should be REORGed.
-      def table_exists?(name)
-        v ||= false # only retry once
-        sch, table_name = schema_and_table(name)
-        name = SQL::QualifiedIdentifier.new(sch, table_name) if sch
-        from(name).first
-        true
-      rescue DatabaseError => e
-        if e.to_s =~ /Operation not allowed for reason code "7" on table/ && v == false
-          # table probably needs reorg
-          reorg(name)
-          v = true
-          retry 
-        end
-        false
       end
 
       private
@@ -298,26 +268,29 @@ module Sequel
       def _execute(conn, sql, opts)
         stmt = log_yield(sql){conn.execute(sql)}
         if block_given?
-          begin
-            yield(stmt)
-          ensure
-            stmt.free
-          end
+          yield(stmt)
         else  
           stmt.affected
         end
+      ensure
+        stmt.free if stmt
+      end
+
+      def adapter_initialize
+        @conversion_procs = DB2_TYPES.dup
+        @conversion_procs[:timestamp] = method(:to_application_timestamp)
       end
 
       # IBM_DB uses an autocommit setting instead of sending SQL queries.
       # So starting a transaction just turns autocommit off.
-      def begin_transaction(conn, opts={})
+      def begin_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_BEGIN){conn.autocommit = false}
         set_transaction_isolation(conn, opts)
       end
 
       # This commits transaction in progress on the
       # connection and sets autocommit back on.
-      def commit_transaction(conn, opts={})
+      def commit_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_COMMIT){conn.commit}
       end
     
@@ -361,8 +334,17 @@ module Sequel
 
       # This rolls back the transaction in progress on the
       # connection and sets autocommit back on.
-      def rollback_transaction(conn, opts={})
+      def rollback_transaction(conn, opts=OPTS)
         log_yield(TRANSACTION_ROLLBACK){conn.rollback}
+      end
+
+      # Convert smallint type to boolean if convert_smallint_to_bool is true
+      def schema_column_type(db_type)
+        if Sequel::IBMDB.convert_smallint_to_bool && db_type =~ /smallint/i 
+          :boolean
+        else
+          super
+        end
       end
     end
     
@@ -383,28 +365,8 @@ module Sequel
         end
       end
       
-      # Methods for DB2 prepared statements using the native driver.
-      module PreparedStatementMethods
-        include Sequel::Dataset::UnnumberedArgumentMapper
-        
-        private
-        # Execute the prepared statement with arguments instead of the given SQL.
-        def execute(sql, opts={}, &block)
-          super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Execute the prepared statment with arguments instead of the given SQL.
-        def execute_dui(sql, opts={}, &block)
-          super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
+      PreparedStatementMethods = prepared_statements_module(:prepare_bind, Sequel::Dataset::UnnumberedArgumentMapper)
 
-        # Execute the prepared statement with arguments instead of the given SQL.
-        def execute_insert(sql, opts={}, &block)
-          super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-
-      end
-      
       # Emulate support of bind arguments in called statements.
       def call(type, bind_arguments={}, *values, &block)
         ps = to_prepared_statement(type, values)
@@ -430,9 +392,10 @@ module Sequel
           stmt.num_fields.times do |i|
             k = stmt.field_name i
             key = output_identifier(k)
-            type = stmt.field_type(k).downcase.to_sym
+            type = stmt.field_type(i).downcase.to_sym
             # decide if it is a smallint from precision
-            type = :boolean  if type ==:int && convert && stmt.field_precision(k) < 8
+            type = :boolean  if type == :int && convert && stmt.field_precision(i) < 8
+            type = :blob if type == :clob && Sequel::DB2.use_clob_as_blob
             columns << [key, cps[type]]
           end
           cols = columns.map{|c| c.at(0)}

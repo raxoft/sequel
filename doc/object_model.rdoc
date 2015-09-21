@@ -3,7 +3,7 @@
 Sequel's dataset layer is mostly structured as an DSL, so it often obscures
 what actual objects are being used.  For example, you don't usually create
 Sequel objects by calling #new on the object's class (other than Sequel::Model
-subclasses).  However, just as almost everything in ruby is an object, all 
+instances).  However, just as almost everything in ruby is an object, all 
 the methods you call in Sequel deal with objects behind the scenes.
 
 There are five main types of Sequel-specific objects that you deal with in
@@ -204,7 +204,7 @@ If Sequel needs to represent an SQL concept that does not map directly to an exi
 ruby class, it will generally use a Sequel::SQL::Expression subclass to represent that
 concept.
 
-Some of the examples below show examples that require the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html].
+Some of the examples below show examples that require the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc].
 
 === Sequel::LiteralString
 
@@ -291,12 +291,17 @@ The following shortcuts exist for creating Sequel::SQL::QualifiedIdentifier obje
 Sequel::SQL::AliasedExpression objects represent aliased expressions in SQL.  The alias
 is treated as an identifier, but the expression can be an arbitrary Sequel expression:
 
-  Sequel::SQL::AliasedExpression.new(:column, :alias) # "column" AS "alias"
+  Sequel::SQL::AliasedExpression.new(:column, :alias)
+  # "column" AS "alias"
+
+  Sequel::SQL::AliasedExpression.new(:table, :alias, [:column_alias1, :column_alias2])
+  # "table" AS "alias"("column_alias1", "column_alias2")
 
 The following shortcuts exist for creating Sequel::SQL::AliasedExpression objects:
 
   Sequel.expr(:column___alias)
   Sequel.as(:column, :alias)
+  Sequel.as(:column, :alias, [:column_alias1, :column_alias2])
   :column.as(:alias) # core_extensions extension
   
 === Sequel::SQL::ComplexExpression
@@ -377,7 +382,7 @@ take arguments.  Still, it's possible they are still useful in some code:
 
   Sequel::SQL::ColumnAll.new(:table) # "table".*
 
-The following shortcut exists for creating Sequel::SQL::Cast objects:
+The following shortcut exists for creating Sequel::SQL::ColumnAll objects:
 
   Sequel.expr(:table).*
   :table.* # core_extensions extension
@@ -504,18 +509,21 @@ The following shortcuts exist for creating Sequel::SQL::OrderedExpression object
 === Sequel::SQL::Subscript
 
 Sequel::SQL::Subscript objects represent SQL database array access.  They take an
-expression and an array of indexes:
+expression and an array of indexes (or a range for an SQL array slice):
 
   Sequel::SQL::Subscript.new(:a, [1]) # "a"[1]
   Sequel::SQL::Subscript.new(:a, [1, 2]) # "a"[1, 2]
+  Sequel::SQL::Subscript.new(:a, [1..2]) # "a"[1:2]
 
 The following shortcuts exist for creating Sequel::SQL::Subscript objects:
 
   Sequel.subscript(:a, 1)
   Sequel.subscript(:a, 1, 2)
+  Sequel.subscript(:a, 1..2)
 
   :a.sql_subscript(1) # core_extensions extension
   :a.sql_subscript(1, 2) # core_extensions extension
+  :a.sql_subscript(1..2) # core_extensions extension
   
 === Sequel::SQL::VirtualRow
 
@@ -527,11 +535,11 @@ block expression support:
 In the above code, the block is instance-evaled inside a VirtualRow instance.
 
 These objects are usually not instantiated manually.  See the
-{Virtual Row Guide}[link:files/doc/virtual_rows_rdoc.html] for details.
+{Virtual Row Guide}[rdoc-ref:doc/virtual_rows.rdoc] for details.
 
 === Sequel::SQL::Window
 
-Sequel::SQL::Window objects represent the windows used by Sequel::SQL::WindowFunction.
+Sequel::SQL::Window objects represent the windows used by Sequel::SQL::Function.
 They use a hash-based API, supporting the :frame, :order, :partition, and :window
 options:
 
@@ -540,17 +548,6 @@ options:
 
   Sequel::SQL::Window.new(:parition=>:a, :frame=>:all)
   # (PARTITION BY "a" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-
-=== Sequel::SQL::WindowFunction
-
-Sequel::SQL::WindowFunction objects represent SQL window function calls.  These
-just combine a Sequel::SQL::Function with a Sequel::SQL::Window:
-
-  function = Sequel::SQL::Function.new(:f, 1)
-  window = Sequel::SQL::Window.new(:order=>:a)
-  Sequel::SQL::WindowFunction.new(function, window) # f(1) OVER (ORDER BY "a")
-
-Virtual rows offer a shortcut for creating Sequel::SQL::Window objects.
 
 === Sequel::SQL::Wrapper
 

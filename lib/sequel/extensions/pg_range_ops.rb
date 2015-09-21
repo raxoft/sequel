@@ -19,8 +19,8 @@
 #
 #   r = Sequel.expr(:range).pg_range
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_range:
 #
 #   r = :range.pg_range
@@ -29,12 +29,12 @@
 # for easier querying:
 #
 #   r.contains(:other)      # range @> other
-#   r.contained_by(:other)  # range <@ other 
+#   r.contained_by(:other)  # range <@ other
 #   r.overlaps(:other)      # range && other
 #   r.left_of(:other)       # range << other
 #   r.right_of(:other)      # range >> other
-#   r.starts_before(:other) # range &< other
-#   r.ends_after(:other)    # range &> other
+#   r.starts_after(:other)  # range &> other
+#   r.ends_before(:other)   # range &< other
 #   r.adjacent_to(:other)   # range -|- other
 #
 #   r.lower            # lower(range)
@@ -52,6 +52,7 @@
 # loading this extension.  Doing so will allow you to use PGArray#op to get
 # an RangeOp, allowing you to perform range operations on range literals.
 
+#
 module Sequel
   module Postgres
     # The RangeOp class is a simple container for a single object that
@@ -66,8 +67,8 @@ module Sequel
         :contained_by => ["(".freeze, " <@ ".freeze, ")".freeze].freeze,
         :left_of => ["(".freeze, " << ".freeze, ")".freeze].freeze,
         :right_of => ["(".freeze, " >> ".freeze, ")".freeze].freeze,
-        :starts_before => ["(".freeze, " &< ".freeze, ")".freeze].freeze,
-        :ends_after => ["(".freeze, " &> ".freeze, ")".freeze].freeze,
+        :ends_before => ["(".freeze, " &< ".freeze, ")".freeze].freeze,
+        :starts_after => ["(".freeze, " &> ".freeze, ")".freeze].freeze,
         :adjacent_to => ["(".freeze, " -|- ".freeze, ")".freeze].freeze,
         :overlaps => ["(".freeze, " && ".freeze, ")".freeze].freeze,
       }

@@ -6,10 +6,8 @@
 #
 # Basic usage in application code:
 #
-#   Sequel.extension :schema_caching
-#
 #   DB = Sequel.connect('...')
-#
+#   DB.extension :schema_caching
 #   DB.load_schema_cache('/path/to/schema.dump')
 #
 #   # load model files
@@ -23,10 +21,8 @@
 # all tables, and you don't worry about race conditions, you can
 # choose to use the following in your application code:
 #
-#   Sequel.extension :schema_caching
-#
 #   DB = Sequel.connect('...')
-#
+#   DB.extension :schema_caching
 #   DB.load_schema_cache?('/path/to/schema.dump')
 #
 #   # load model files
@@ -46,8 +42,9 @@
 # and it handles all ruby objects used in the schema hash.  Because of this,
 # you should not attempt to load the schema from a untrusted file.
 
+#
 module Sequel
-  class Database
+  module SchemaCaching
     # Dump the cached schema to the filename given in Marshal format.
     def dump_schema_cache(file)
       File.open(file, 'wb'){|f| f.write(Marshal.dump(@schemas))}
@@ -73,4 +70,6 @@ module Sequel
       load_schema_cache(file) if File.exist?(file)
     end
   end
+
+  Database.register_extension(:schema_caching, SchemaCaching)
 end

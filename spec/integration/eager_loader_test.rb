@@ -2,8 +2,8 @@ require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
 
 describe "Eagerly loading a tree structure" do
   before(:all) do
-    INTEGRATION_DB.instance_variable_set(:@schemas, {})
-    INTEGRATION_DB.create_table!(:nodes) do
+    DB.instance_variable_set(:@schemas, {})
+    DB.create_table!(:nodes) do
       primary_key :id
       foreign_key :parent_id, :nodes
     end
@@ -68,53 +68,53 @@ describe "Eagerly loading a tree structure" do
     Node.insert(:parent_id=>6)
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :nodes
+    DB.drop_table :nodes
     Object.send(:remove_const, :Node)
   end
 
   it "#descendants should get all descendants in one call" do
     nodes = Node.filter(:id=>1).eager(:descendants).all
-    nodes.length.should == 1
+    nodes.length.must_equal 1
     node = nodes.first
-    node.pk.should == 1
-    node.children.length.should == 2
-    node.children.collect{|x| x.pk}.sort.should == [2, 3]
-    node.children.collect{|x| x.parent}.should == [node, node]
+    node.pk.must_equal 1
+    node.children.length.must_equal 2
+    node.children.collect{|x| x.pk}.sort.must_equal [2, 3]
+    node.children.collect{|x| x.parent}.must_equal [node, node]
     node = nodes.first.children.find{|x| x.pk == 2}
-    node.children.length.should == 1
-    node.children.first.pk.should == 4
-    node.children.first.parent.should == node
+    node.children.length.must_equal 1
+    node.children.first.pk.must_equal 4
+    node.children.first.parent.must_equal node
     node = node.children.first
-    node.children.length.should == 1
-    node.children.first.pk.should == 5
-    node.children.first.parent.should == node
+    node.children.length.must_equal 1
+    node.children.first.pk.must_equal 5
+    node.children.first.parent.must_equal node
     node = node.children.first
-    node.children.length.should == 1
-    node.children.first.pk.should == 6
-    node.children.first.parent.should == node
+    node.children.length.must_equal 1
+    node.children.first.pk.must_equal 6
+    node.children.first.parent.must_equal node
     node = node.children.first
-    node.children.length.should == 1
-    node.children.first.pk.should == 7
-    node.children.first.parent.should == node
+    node.children.length.must_equal 1
+    node.children.first.pk.must_equal 7
+    node.children.first.parent.must_equal node
   end
 
   it "#ancestors should get all ancestors in one call" do
     nodes = Node.filter(:id=>[7,3]).order(:id).eager(:ancestors).all
-    nodes.length.should == 2
-    nodes.collect{|x| x.pk}.should == [3, 7]
-    nodes.first.parent.pk.should == 1
-    nodes.first.parent.parent.should == nil
+    nodes.length.must_equal 2
+    nodes.collect{|x| x.pk}.must_equal [3, 7]
+    nodes.first.parent.pk.must_equal 1
+    nodes.first.parent.parent.must_equal nil
     node = nodes.last
-    node.parent.pk.should == 6
+    node.parent.pk.must_equal 6
     node = node.parent
-    node.parent.pk.should == 5
+    node.parent.pk.must_equal 5
     node = node.parent
-    node.parent.pk.should == 4
+    node.parent.pk.must_equal 4
     node = node.parent
-    node.parent.pk.should == 2
+    node.parent.pk.must_equal 2
     node = node.parent
-    node.parent.pk.should == 1
-    node.parent.parent.should == nil
+    node.parent.pk.must_equal 1
+    node.parent.parent.must_equal nil
   end
 end
 
@@ -128,14 +128,14 @@ describe "Association Extensions" do
         first(:name=>name) || model.create(:name=>name, :author_id=>model_object.pk)
       end
     end
-    INTEGRATION_DB.instance_variable_set(:@schemas, {})
-    INTEGRATION_DB.create_table!(:authors) do
+    DB.instance_variable_set(:@schemas, {})
+    DB.create_table!(:authors) do
       primary_key :id
     end
     class ::Author < Sequel::Model
       one_to_many :authorships, :extend=>FindOrCreate
     end
-    INTEGRATION_DB.create_table!(:authorships) do
+    DB.create_table!(:authorships) do
       primary_key :id
       foreign_key :author_id, :authors
       String :name
@@ -146,33 +146,33 @@ describe "Association Extensions" do
     @author = Author.create
   end
   after do
-    INTEGRATION_DB.drop_table :authorships, :authors
+    DB.drop_table :authorships, :authors
     Object.send(:remove_const, :Author)
     Object.send(:remove_const, :Authorship)
   end
 
   it "should allow methods to be called on the dataset method" do
-    Authorship.count.should == 0
+    Authorship.count.must_equal 0
     authorship = @author.authorships_dataset.find_or_create_by_name('Bob')
-    Authorship.count.should == 1
-    Authorship.first.should == authorship
-    authorship.name.should == 'Bob'
-    authorship.author_id.should == @author.id
-    @author.authorships_dataset.find_or_create_by_name('Bob').should == authorship
-    Authorship.count.should == 1
+    Authorship.count.must_equal 1
+    Authorship.first.must_equal authorship
+    authorship.name.must_equal 'Bob'
+    authorship.author_id.must_equal @author.id
+    @author.authorships_dataset.find_or_create_by_name('Bob').must_equal authorship
+    Authorship.count.must_equal 1
     authorship2 = @author.authorships_dataset.find_or_create(:name=>'Jim')
-    Authorship.count.should == 2
-    Authorship.order(:name).map(:name).should == ['Bob', 'Jim']
-    authorship2.name.should == 'Jim'
-    authorship2.author_id.should == @author.id
-    @author.authorships_dataset.find_or_create(:name=>'Jim').should == authorship2
+    Authorship.count.must_equal 2
+    Authorship.order(:name).map(:name).must_equal ['Bob', 'Jim']
+    authorship2.name.must_equal 'Jim'
+    authorship2.author_id.must_equal @author.id
+    @author.authorships_dataset.find_or_create(:name=>'Jim').must_equal authorship2
   end
 end
 
 describe "has_many :through has_many and has_one :through belongs_to" do
   before(:all) do
-    INTEGRATION_DB.instance_variable_set(:@schemas, {})
-    INTEGRATION_DB.create_table!(:firms) do
+    DB.instance_variable_set(:@schemas, {})
+    DB.create_table!(:firms) do
       primary_key :id
     end
     class ::Firm < Sequel::Model
@@ -195,7 +195,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
         end)
     end
 
-    INTEGRATION_DB.create_table!(:clients) do
+    DB.create_table!(:clients) do
       primary_key :id
       foreign_key :firm_id, :firms
     end
@@ -204,7 +204,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
       one_to_many :invoices
     end
 
-    INTEGRATION_DB.create_table!(:invoices) do
+    DB.create_table!(:invoices) do
       primary_key :id
       foreign_key :client_id, :clients
     end
@@ -251,7 +251,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
     @invoice5 = Invoice.create(:client => @client3)
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :invoices, :clients, :firms
+    DB.drop_table :invoices, :clients, :firms
     Object.send(:remove_const, :Firm)
     Object.send(:remove_const, :Client)
     Object.send(:remove_const, :Invoice)
@@ -259,146 +259,125 @@ describe "has_many :through has_many and has_one :through belongs_to" do
 
   it "should return has_many :through has_many records for a single object" do
     invs = @firm1.invoices.sort_by{|x| x.pk}
-    invs.should == [@invoice1, @invoice2, @invoice3]
-    invs[0].client.should == @client1
-    invs[1].client.should == @client1
-    invs[2].client.should == @client2
-    invs.collect{|i| i.firm}.should == [@firm1, @firm1, @firm1]
-    invs.collect{|i| i.client.firm}.should == [@firm1, @firm1, @firm1]
+    invs.must_equal [@invoice1, @invoice2, @invoice3]
+    invs[0].client.must_equal @client1
+    invs[1].client.must_equal @client1
+    invs[2].client.must_equal @client2
+    invs.collect{|i| i.firm}.must_equal [@firm1, @firm1, @firm1]
+    invs.collect{|i| i.client.firm}.must_equal [@firm1, @firm1, @firm1]
   end
 
   it "should eagerly load has_many :through has_many records for multiple objects" do
     firms = Firm.order(:id).eager(:invoices).all
-    firms.should == [@firm1, @firm2]
+    firms.must_equal [@firm1, @firm2]
     firm1, firm2 = firms
     invs1 = firm1.invoices.sort_by{|x| x.pk}
     invs2 = firm2.invoices.sort_by{|x| x.pk}
-    invs1.should == [@invoice1, @invoice2, @invoice3]
-    invs2.should == [@invoice4, @invoice5]
-    invs1[0].client.should == @client1
-    invs1[1].client.should == @client1
-    invs1[2].client.should == @client2
-    invs2[0].client.should == @client3
-    invs2[1].client.should == @client3
-    invs1.collect{|i| i.firm}.should == [@firm1, @firm1, @firm1]
-    invs2.collect{|i| i.firm}.should == [@firm2, @firm2]
-    invs1.collect{|i| i.client.firm}.should == [@firm1, @firm1, @firm1]
-    invs2.collect{|i| i.client.firm}.should == [@firm2, @firm2]
+    invs1.must_equal [@invoice1, @invoice2, @invoice3]
+    invs2.must_equal [@invoice4, @invoice5]
+    invs1[0].client.must_equal @client1
+    invs1[1].client.must_equal @client1
+    invs1[2].client.must_equal @client2
+    invs2[0].client.must_equal @client3
+    invs2[1].client.must_equal @client3
+    invs1.collect{|i| i.firm}.must_equal [@firm1, @firm1, @firm1]
+    invs2.collect{|i| i.firm}.must_equal [@firm2, @firm2]
+    invs1.collect{|i| i.client.firm}.must_equal [@firm1, @firm1, @firm1]
+    invs2.collect{|i| i.client.firm}.must_equal [@firm2, @firm2]
   end
 
   it "should return has_one :through belongs_to records for a single object" do
     firm = @invoice1.firm
-    firm.should == @firm1
-    @invoice1.client.should == @client1
-    @invoice1.client.firm.should == @firm1
-    firm.associations[:clients].should == nil
+    firm.must_equal @firm1
+    @invoice1.client.must_equal @client1
+    @invoice1.client.firm.must_equal @firm1
+    firm.associations[:clients].must_equal nil
   end
 
   it "should eagerly load has_one :through belongs_to records for multiple objects" do
     invs = Invoice.order(:id).eager(:firm).all
-    invs.should == [@invoice1, @invoice2, @invoice3, @invoice4, @invoice5]
-    invs[0].firm.should == @firm1
-    invs[0].client.should == @client1
-    invs[0].client.firm.should == @firm1
-    invs[0].firm.associations[:clients].should == nil
-    invs[1].firm.should == @firm1
-    invs[1].client.should == @client1
-    invs[1].client.firm.should == @firm1
-    invs[1].firm.associations[:clients].should == nil
-    invs[2].firm.should == @firm1
-    invs[2].client.should == @client2
-    invs[2].client.firm.should == @firm1
-    invs[2].firm.associations[:clients].should == nil
-    invs[3].firm.should == @firm2
-    invs[3].client.should == @client3
-    invs[3].client.firm.should == @firm2
-    invs[3].firm.associations[:clients].should == nil
-    invs[4].firm.should == @firm2
-    invs[4].client.should == @client3
-    invs[4].client.firm.should == @firm2
-    invs[4].firm.associations[:clients].should == nil
+    invs.must_equal [@invoice1, @invoice2, @invoice3, @invoice4, @invoice5]
+    invs[0].firm.must_equal @firm1
+    invs[0].client.must_equal @client1
+    invs[0].client.firm.must_equal @firm1
+    invs[0].firm.associations[:clients].must_equal nil
+    invs[1].firm.must_equal @firm1
+    invs[1].client.must_equal @client1
+    invs[1].client.firm.must_equal @firm1
+    invs[1].firm.associations[:clients].must_equal nil
+    invs[2].firm.must_equal @firm1
+    invs[2].client.must_equal @client2
+    invs[2].client.firm.must_equal @firm1
+    invs[2].firm.associations[:clients].must_equal nil
+    invs[3].firm.must_equal @firm2
+    invs[3].client.must_equal @client3
+    invs[3].client.firm.must_equal @firm2
+    invs[3].firm.associations[:clients].must_equal nil
+    invs[4].firm.must_equal @firm2
+    invs[4].client.must_equal @client3
+    invs[4].client.firm.must_equal @firm2
+    invs[4].firm.associations[:clients].must_equal nil
   end
 end
 
 describe "Polymorphic Associations" do
   before(:all) do
-    INTEGRATION_DB.instance_variable_set(:@schemas, {})
-    INTEGRATION_DB.create_table!(:assets) do
+    DB.instance_variable_set(:@schemas, {})
+    DB.create_table!(:assets) do
       primary_key :id
       Integer :attachable_id
       String :attachable_type
     end
     class ::Asset < Sequel::Model
       m = method(:constantize)
-      many_to_one :attachable, :reciprocal=>:assets, \
+      many_to_one :attachable, :reciprocal=>:assets, :reciprocal_type=>:one_to_many,
+        :setter=>(proc do |attachable|
+          self[:attachable_id] = (attachable.pk if attachable)
+          self[:attachable_type] = (attachable.class.name if attachable)
+        end),
         :dataset=>(proc do
           klass = m.call(attachable_type)
           klass.where(klass.primary_key=>attachable_id)
-        end), \
+        end),
         :eager_loader=>(proc do |eo|
           id_map = {}
           eo[:rows].each do |asset|
             asset.associations[:attachable] = nil 
             ((id_map[asset.attachable_type] ||= {})[asset.attachable_id] ||= []) << asset
           end 
-          id_map.each do |klass_name, id_map|
+          id_map.each do |klass_name, idmap|
             klass = m.call(klass_name)
-            klass.where(klass.primary_key=>id_map.keys).all do |attach|
-              id_map[attach.pk].each do |asset|
+            klass.where(klass.primary_key=>idmap.keys).all do |attach|
+              idmap[attach.pk].each do |asset|
                 asset.associations[:attachable] = attach
               end 
             end 
           end 
         end)
-            
-      private
-
-      def _attachable=(attachable)
-        self[:attachable_id] = (attachable.pk if attachable)
-        self[:attachable_type] = (attachable.class.name if attachable)
-      end 
     end 
   
-    INTEGRATION_DB.create_table!(:posts) do
+    DB.create_table!(:posts) do
       primary_key :id
     end
     class ::Post < Sequel::Model
-      one_to_many :assets, :key=>:attachable_id, :reciprocal=>:attachable, :conditions=>{:attachable_type=>'Post'}
-      
-      private
-
-      def _add_asset(asset)
-        asset.update(:attachable_id=>pk, :attachable_type=>'Post')
-      end
-      def _remove_asset(asset)
-        asset.update(:attachable_id=>nil, :attachable_type=>nil)
-      end
-      def _remove_all_assets
-        assets_dataset.update(:attachable_id=>nil, :attachable_type=>nil)
-      end
+      one_to_many :assets, :key=>:attachable_id, :reciprocal=>:attachable, :conditions=>{:attachable_type=>'Post'},
+        :adder=>proc{|asset| asset.update(:attachable_id=>pk, :attachable_type=>'Post')},
+        :remover=>proc{|asset| asset.update(:attachable_id=>nil, :attachable_type=>nil)},
+        :clearer=>proc{assets_dataset.update(:attachable_id=>nil, :attachable_type=>nil)}
     end 
   
-    INTEGRATION_DB.create_table!(:notes) do
+    DB.create_table!(:notes) do
       primary_key :id
     end
     class ::Note < Sequel::Model
-      one_to_many :assets, :key=>:attachable_id, :reciprocal=>:attachable, :conditions=>{:attachable_type=>'Note'}     
-
-      private
-
-      def _add_asset(asset)
-        asset.update(:attachable_id=>pk, :attachable_type=>'Note')
-      end
-      def _remove_asset(asset)
-        asset.update(:attachable_id=>nil, :attachable_type=>nil)
-      end
-      def _remove_all_assets
-        assets_dataset.update(:attachable_id=>nil, :attachable_type=>nil)
-      end
+      one_to_many :assets, :key=>:attachable_id, :reciprocal=>:attachable, :conditions=>{:attachable_type=>'Note'},     
+        :adder=>proc{|asset| asset.update(:attachable_id=>pk, :attachable_type=>'Note')},
+        :remover=>proc{|asset| asset.update(:attachable_id=>nil, :attachable_type=>nil)},
+        :clearer=>proc{assets_dataset.update(:attachable_id=>nil, :attachable_type=>nil)}
     end
   end
   before do
-    [:assets, :posts, :notes].each{|t| INTEGRATION_DB[t].delete}
+    [:assets, :posts, :notes].each{|t| DB[t].delete}
     @post = Post.create
     Note.create
     @note = Note.create
@@ -408,75 +387,84 @@ describe "Polymorphic Associations" do
     @asset2.associations.clear
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :assets, :posts, :notes
+    DB.drop_table :assets, :posts, :notes
     Object.send(:remove_const, :Asset)
     Object.send(:remove_const, :Post)
     Object.send(:remove_const, :Note)
   end
 
   it "should load the correct associated object for a single object" do
-    @asset1.attachable.should == @post
-    @asset2.attachable.should == @note
+    @asset1.attachable.must_equal @post
+    @asset2.attachable.must_equal @note
   end
 
   it "should eagerly load the correct associated object for a group of objects" do
     assets = Asset.order(:id).eager(:attachable).all
-    assets.should == [@asset1, @asset2]
-    assets[0].attachable.should == @post
-    assets[1].attachable.should == @note
+    assets.must_equal [@asset1, @asset2]
+    assets[0].attachable.must_equal @post
+    assets[1].attachable.must_equal @note
   end
 
   it "should set items correctly" do
     @asset1.attachable = @note
     @asset2.attachable = @post
-    @asset1.attachable.should == @note
-    @asset1.attachable_id.should == @note.pk
-    @asset1.attachable_type.should == 'Note'
-    @asset2.attachable.should == @post
-    @asset2.attachable_id.should == @post.pk
-    @asset2.attachable_type.should == 'Post'
+    @asset1.attachable.must_equal @note
+    @asset1.attachable_id.must_equal @note.pk
+    @asset1.attachable_type.must_equal 'Note'
+    @asset2.attachable.must_equal @post
+    @asset2.attachable_id.must_equal @post.pk
+    @asset2.attachable_type.must_equal 'Post'
     @asset1.attachable = nil
-    @asset1.attachable.should == nil
-    @asset1.attachable_id.should == nil
-    @asset1.attachable_type.should == nil
+    @asset1.attachable.must_equal nil
+    @asset1.attachable_id.must_equal nil
+    @asset1.attachable_type.must_equal nil
   end
 
   it "should add items correctly" do
-    @post.assets.should == [@asset1]
+    @post.assets.must_equal [@asset1]
     @post.add_asset(@asset2)
-    @post.assets.should == [@asset1, @asset2]
-    @asset2.attachable.should == @post
-    @asset2.attachable_id.should == @post.pk
-    @asset2.attachable_type.should == 'Post'
+    @post.assets.must_equal [@asset1, @asset2]
+    @asset2.attachable.must_equal @post
+    @asset2.attachable_id.must_equal @post.pk
+    @asset2.attachable_type.must_equal 'Post'
   end
 
   it "should remove items correctly" do
-    @note.assets.should == [@asset2]
+    @note.assets.must_equal [@asset2]
     @note.remove_asset(@asset2)
-    @note.assets.should == []
-    @asset2.attachable.should == nil
-    @asset2.attachable_id.should == nil
-    @asset2.attachable_type.should == nil
+    @note.assets.must_equal []
+    @asset2.attachable.must_equal nil
+    @asset2.attachable_id.must_equal nil
+    @asset2.attachable_type.must_equal nil
   end
 
   it "should remove all items correctly" do
     @post.remove_all_assets
     @note.remove_all_assets
-    @asset1.reload.attachable.should == nil
-    @asset2.reload.attachable.should == nil
+    @asset1.reload.attachable.must_equal nil
+    @asset2.reload.attachable.must_equal nil
   end
 end
 
 describe "many_to_one/one_to_many not referencing primary key" do
   before(:all) do
-    INTEGRATION_DB.instance_variable_set(:@schemas, {})
-    INTEGRATION_DB.create_table!(:clients) do
+    DB.instance_variable_set(:@schemas, {})
+    DB.create_table!(:clients) do
       primary_key :id
       String :name
     end
     class ::Client < Sequel::Model
-      one_to_many :invoices, :reciprocal=>:client, \
-        :dataset=>proc{Invoice.filter(:client_name=>name)}, \
+      one_to_many :invoices, :reciprocal=>:client,
+        :adder=>(proc do |invoice|
+          invoice.client_name = name
+          invoice.save
+        end),
+        :remover=>(proc do |invoice|
+          invoice.client_name = nil
+          invoice.save
+        end),
+        :clearer=>proc{invoices_dataset.update(:client_name=>nil)},
+        :dataset=>proc{Invoice.filter(:client_name=>name)},
         :eager_loader=>(proc do |eo|
           id_map = {}
           eo[:rows].each do |client|
@@ -488,29 +476,16 @@ describe "many_to_one/one_to_many not referencing primary key" do
             client.associations[:invoices] << inv 
           end 
         end)
-
-      private
-
-      def _add_invoice(invoice)
-        invoice.client_name = name
-        invoice.save
-      end
-      def _remove_invoice(invoice)
-        invoice.client_name = nil
-        invoice.save
-      end
-      def _remove_all_invoices
-        Invoice.filter(:client_name=>name).update(:client_name=>nil)
-      end
     end 
   
-    INTEGRATION_DB.create_table!(:invoices) do
+    DB.create_table!(:invoices) do
       primary_key :id
       String :client_name
     end
     class ::Invoice < Sequel::Model
-      many_to_one :client, :key=>:client_name, \
-        :dataset=>proc{Client.filter(:name=>client_name)}, \
+      many_to_one :client, :key=>:client_name,
+        :setter=>proc{|client| self.client_name = (client.name if client)},
+        :dataset=>proc{Client.filter(:name=>client_name)},
         :eager_loader=>(proc do |eo|
           id_map = eo[:id_map]
           eo[:rows].each{|inv| inv.associations[:client] = nil}
@@ -518,95 +493,89 @@ describe "many_to_one/one_to_many not referencing primary key" do
             id_map[client.name].each{|inv| inv.associations[:client] = client}
           end 
         end)
-      
-      private
-
-      def _client=(client)
-        self.client_name = (client.name if client)
-      end
     end
   end
   before do
-    Client.delete
-    Invoice.delete
+    Client.dataset.delete
+    Invoice.dataset.delete
     @client1 = Client.create(:name=>'X')
     @client2 = Client.create(:name=>'Y')
     @invoice1 = Invoice.create(:client_name=>'X')
     @invoice2 = Invoice.create(:client_name=>'X')
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :invoices, :clients
+    DB.drop_table :invoices, :clients
     Object.send(:remove_const, :Client)
     Object.send(:remove_const, :Invoice)
   end
 
   it "should load all associated one_to_many objects for a single object" do
     invs = @client1.invoices
-    invs.should == [@invoice1, @invoice2]
-    invs[0].client.should == @client1
-    invs[1].client.should == @client1
+    invs.must_equal [@invoice1, @invoice2]
+    invs[0].client.must_equal @client1
+    invs[1].client.must_equal @client1
   end
 
   it "should load the associated many_to_one object for a single object" do
     client = @invoice1.client
-    client.should == @client1
+    client.must_equal @client1
   end
 
   it "should eagerly load all associated one_to_many objects for a group of objects" do
     clients = Client.order(:id).eager(:invoices).all
-    clients.should == [@client1, @client2]
-    clients[1].invoices.should == []
+    clients.must_equal [@client1, @client2]
+    clients[1].invoices.must_equal []
     invs = clients[0].invoices.sort_by{|x| x.pk}
-    invs.should == [@invoice1, @invoice2]
-    invs[0].client.should == @client1
-    invs[1].client.should == @client1
+    invs.must_equal [@invoice1, @invoice2]
+    invs[0].client.must_equal @client1
+    invs[1].client.must_equal @client1
   end
 
   it "should eagerly load the associated many_to_one object for a group of objects" do
     invoices = Invoice.order(:id).eager(:client).all
-    invoices.should == [@invoice1, @invoice2]
-    invoices[0].client.should == @client1
-    invoices[1].client.should == @client1
+    invoices.must_equal [@invoice1, @invoice2]
+    invoices[0].client.must_equal @client1
+    invoices[1].client.must_equal @client1
   end
 
   it "should set the associated object correctly" do
     @invoice1.client = @client2
-    @invoice1.client.should == @client2
-    @invoice1.client_name.should == 'Y'
+    @invoice1.client.must_equal @client2
+    @invoice1.client_name.must_equal 'Y'
     @invoice1.client = nil
-    @invoice1.client_name.should == nil
+    @invoice1.client_name.must_equal nil
   end
 
   it "should add the associated object correctly" do
-    @client2.invoices.should == []
+    @client2.invoices.must_equal []
     @client2.add_invoice(@invoice1)
-    @client2.invoices.should == [@invoice1]
-    @invoice1.client_name.should == 'Y'
+    @client2.invoices.must_equal [@invoice1]
+    @invoice1.client_name.must_equal 'Y'
     @invoice1.client = nil
-    @invoice1.client_name.should == nil
+    @invoice1.client_name.must_equal nil
   end
 
   it "should remove the associated object correctly" do
     invs = @client1.invoices.sort_by{|x| x.pk}
-    invs.should == [@invoice1, @invoice2]
+    invs.must_equal [@invoice1, @invoice2]
     @client1.remove_invoice(@invoice1)
-    @client1.invoices.should == [@invoice2]
-    @invoice1.client_name.should == nil
-    @invoice1.client.should == nil
+    @client1.invoices.must_equal [@invoice2]
+    @invoice1.client_name.must_equal nil
+    @invoice1.client.must_equal nil
   end
 
   it "should remove all associated objects correctly" do
-    invs = @client1.remove_all_invoices
-    @invoice1.refresh.client.should == nil
-    @invoice1.client_name.should == nil
-    @invoice2.refresh.client.should == nil
-    @invoice2.client_name.should == nil
+    @client1.remove_all_invoices
+    @invoice1.refresh.client.must_equal nil
+    @invoice1.client_name.must_equal nil
+    @invoice2.refresh.client.must_equal nil
+    @invoice2.client_name.must_equal nil
   end
 end
 
 describe "statistics associations" do
   before(:all) do
-    INTEGRATION_DB.create_table!(:projects) do
+    DB.create_table!(:projects) do
       primary_key :id
       String :name
     end
@@ -630,7 +599,7 @@ describe "statistics associations" do
       end 
     end 
 
-    INTEGRATION_DB.create_table!(:tickets) do
+    DB.create_table!(:tickets) do
       primary_key :id
       foreign_key :project_id, :projects
       Integer :hours
@@ -647,40 +616,40 @@ describe "statistics associations" do
     @ticket4 = Ticket.create(:project=>@project2, :hours=>20)
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :tickets, :projects
+    DB.drop_table :tickets, :projects
     Object.send(:remove_const, :Project)
     Object.send(:remove_const, :Ticket)
   end
 
   it "should give the correct sum of ticket hours for each project" do
-    @project1.ticket_hours.to_i.should == 11
-    @project2.ticket_hours.to_i.should == 22
+    @project1.ticket_hours.to_i.must_equal 11
+    @project2.ticket_hours.to_i.must_equal 22
   end
 
   it "should give the correct sum of ticket hours for each project when eager loading" do
     p1, p2 = Project.order(:name).eager(:ticket_hours).all
-    p1.ticket_hours.to_i.should == 11
-    p2.ticket_hours.to_i.should == 22
+    p1.ticket_hours.to_i.must_equal 11
+    p2.ticket_hours.to_i.must_equal 22
   end
 end
 
 describe "one to one associations" do
   before(:all) do
-    INTEGRATION_DB.create_table!(:books) do
+    DB.create_table!(:books) do
       primary_key :id
     end
     class ::Book < Sequel::Model
-      one_to_one :first_page, :class=>:Page, :conditions=>{:page_number=>1}
-      one_to_one :second_page, :class=>:Page, :conditions=>{:page_number=>2}
+      one_to_one :first_page, :class=>:Page, :conditions=>{:page_number=>1}, :reciprocal=>nil
+      one_to_one :second_page, :class=>:Page, :conditions=>{:page_number=>2}, :reciprocal=>nil
     end
 
-    INTEGRATION_DB.create_table!(:pages) do
+    DB.create_table!(:pages) do
       primary_key :id
       foreign_key :book_id, :books
       Integer :page_number
     end
     class ::Page < Sequel::Model
-      many_to_one :book
+      many_to_one :book, :reciprocal=>nil
     end
 
     @book1 = Book.create
@@ -691,28 +660,28 @@ describe "one to one associations" do
     @page4 = Page.create(:book=>@book2, :page_number=>2)
   end
   after(:all) do
-    INTEGRATION_DB.drop_table :pages, :books
+    DB.drop_table :pages, :books
     Object.send(:remove_const, :Book)
     Object.send(:remove_const, :Page)
   end
 
   it "should be eager loadable" do
     bk1, bk2 = Book.filter(:books__id=>[1,2]).eager(:first_page).all
-    bk1.first_page.should == @page1
-    bk2.first_page.should == @page3
+    bk1.first_page.must_equal @page1
+    bk2.first_page.must_equal @page3
   end
 
   it "should be eager graphable" do
     bk1, bk2 = Book.filter(:books__id=>[1,2]).eager_graph(:first_page).all
-    bk1.first_page.should == @page1
-    bk2.first_page.should == @page3
+    bk1.first_page.must_equal @page1
+    bk2.first_page.must_equal @page3
   end
 
   it "should be eager graphable two at once" do
     bk1, bk2 = Book.filter(:books__id=>[1,2]).eager_graph(:first_page, :second_page).all
-    bk1.first_page.should == @page1
-    bk1.second_page.should == @page2
-    bk2.first_page.should == @page3
-    bk2.second_page.should == @page4
+    bk1.first_page.must_equal @page1
+    bk1.second_page.must_equal @page2
+    bk2.first_page.must_equal @page3
+    bk2.second_page.must_equal @page4
   end
 end

@@ -1,4 +1,4 @@
-Sequel.require 'connection_pool/threaded'
+require 'sequel/connection_pool/threaded'
 
 # The slowest and most advanced connection, dealing with both multi-threaded
 # access and configurations with multiple shards/servers.
@@ -7,17 +7,23 @@ Sequel.require 'connection_pool/threaded'
 # to be removed from the pool when they are returned to it.
 class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # The following additional options are respected:
-  # * :servers - A hash of servers to use.  Keys should be symbols.  If not
-  #   present, will use a single :default server.
-  # * :servers_hash - The base hash to use for the servers.  By default,
-  #   Sequel uses Hash.new(:default).  You can use a hash with a default proc
-  #   that raises an error if you want to catch all cases where a nonexistent
-  #   server is used.
-  def initialize(db, opts = {})
+  # :servers :: A hash of servers to use.  Keys should be symbols.  If not
+  #             present, will use a single :default server.
+  # :servers_hash :: The base hash to use for the servers.  By default,
+  #                  Sequel uses Hash.new(:default).  You can use a hash with a default proc
+  #                  that raises an error if you want to catch all cases where a nonexistent
+  #                  server is used.
+  def initialize(db, opts = OPTS)
     super
     @available_connections = {}
     @connections_to_remove = []
     @servers = opts.fetch(:servers_hash, Hash.new(:default))
+
+    if USE_WAITER
+      @waiter = nil
+      @waiters = {}
+    end
+
     add_servers([:default])
     add_servers(opts[:servers].keys) if opts[:servers]
   end
@@ -32,6 +38,7 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
           @servers[server] = server
           @available_connections[server] = []
           @allocated[server] = {}
+          @waiters[server] = ConditionVariable.new if USE_WAITER
         end
       end
     end
@@ -84,9 +91,9 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # 
   # Once a connection is requested using #hold, the connection pool
   # creates new connections to the database. Options:
-  # * :server - Should be a symbol specifing the server to disconnect from,
-  #   or an array of symbols to specify multiple servers.
-  def disconnect(opts={})
+  # :server :: Should be a symbol specifing the server to disconnect from,
+  #            or an array of symbols to specify multiple servers.
+  def disconnect(opts=OPTS)
     sync do
       (opts[:server] ? Array(opts[:server]) : @servers.keys).each do |s|
         disconnect_server(s)
@@ -115,16 +122,7 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
       return yield(conn)
     end
     begin
-      unless conn = acquire(t, server)
-        time = Time.now
-        timeout = time + @timeout
-        sleep_time = @sleep_time
-        sleep sleep_time
-        until conn = acquire(t, server)
-          raise(::Sequel::PoolTimeout) if Time.now > timeout
-          sleep sleep_time
-        end
-      end
+      conn = acquire(t, server)
       yield conn
     rescue Sequel::DatabaseDisconnectError
       sync{@connections_to_remove << conn} if conn
@@ -144,6 +142,7 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
       servers.each do |server|
         if @servers.include?(server)
           disconnect_server(server)
+          @waiters.delete(server) if USE_WAITER
           @available_connections.delete(server)
           @allocated.delete(server)
           @servers.delete(server)
@@ -164,16 +163,65 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   private
 
   # Assigns a connection to the supplied thread for the given server, if one
-  # is available. The calling code should NOT already have the mutex when
+  # is available. The calling code should already have the mutex when
   # calling this.
-  def acquire(thread, server)
-    sync do
-      if conn = available(server)
-        allocated(server)[thread] = conn
-      end
+  def _acquire(thread, server)
+    if conn = available(server)
+      allocated(server)[thread] = conn
     end
   end
   
+  if USE_WAITER
+    # Assigns a connection to the supplied thread, if one
+    # is available. The calling code should NOT already have the mutex when
+    # calling this.
+    #
+    # This should return a connection is one is available within the timeout,
+    # or nil if a connection could not be acquired within the timeout.
+    def acquire(thread, server)
+      sync do
+        if conn = _acquire(thread, server)
+          return conn
+        end
+
+        time = Time.now
+        @waiters[server].wait(@mutex, @timeout)
+        Thread.pass
+
+        until conn = _acquire(thread, server)
+          deadline ||= time + @timeout
+          current_time = Time.now
+          raise(::Sequel::PoolTimeout, "timeout: #{@timeout}, elapsed: #{current_time - time}") if current_time > deadline
+          # :nocov:
+          # It's difficult to get to this point, it can only happen if there is a race condition
+          # where a connection cannot be acquired even after the thread is signalled by the condition
+          # variable that a connection is ready.
+          @waiters[server].wait(@mutex, deadline - current_time)
+          Thread.pass
+          # :nocov:
+        end
+
+        conn
+      end
+    end
+  else
+    # :nocov:
+    def acquire(thread, server)
+      unless conn = sync{_acquire(thread, server)}
+        time = Time.now
+        timeout = time + @timeout
+        sleep_time = @sleep_time
+        sleep sleep_time
+        until conn = sync{_acquire(thread, server)}
+          raise(::Sequel::PoolTimeout, "timeout: #{@timeout}, elapsed: #{Time.now - time}") if Time.now > timeout
+          sleep sleep_time
+        end
+      end
+      conn
+    end
+    # :nocov:
+  end
+
   # Returns an available connection to the given server. If no connection is
   # available, tries to create a new connection. The calling code should already
   # have the mutex before calling this.
@@ -185,13 +233,11 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # returns the connection. The calling code should already have the mutex
   # before calling this.
   def checkin_connection(server, conn)
-    case @connection_handling
-    when :queue
-      available_connections(server).unshift(conn)
-    else
-      available_connections(server) << conn
+    available_connections(server) << conn
+    if USE_WAITER
+      @waiters[server].signal
+      Thread.pass
     end
-
     conn
   end
 
@@ -222,7 +268,12 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # if there is not currently an available connection for the server.
   # The calling code should already have the mutex before calling this.
   def next_available(server)
-    available_connections(server).pop
+    case @connection_handling
+    when :stack
+      available_connections(server).pop
+    else
+      available_connections(server).shift
+    end
   end
   
   # Returns the connection owned by the supplied thread for the given server,
@@ -234,6 +285,11 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # If the server given is in the hash, return it, otherwise, return the default server.
   def pick_server(server)
     sync{@servers[server]}
+  end
+  
+  # Create the maximum number of connections to each server immediately.
+  def preconnect
+    servers.each{|s| (max_size - size(s)).times{checkin_connection(s, make_new(s))}}
   end
   
   # Releases the connection assigned to the supplied thread and server. If the

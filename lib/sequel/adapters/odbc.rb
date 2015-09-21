@@ -2,6 +2,10 @@ require 'odbc'
 
 module Sequel
   module ODBC
+    # Contains procs keyed on subadapter type that extend the
+    # given database object so it supports the correct database type.
+    DATABASE_SETUP = {}
+      
     class Database < Sequel::Database
       set_adapter_scheme :odbc
 
@@ -9,28 +13,11 @@ module Sequel
       DRV_NAME_GUARDS = '{%s}'.freeze
       DISCONNECT_ERRORS = /\A08S01/.freeze 
 
-      def initialize(opts)
-        super
-        case @opts[:db_type]
-        when 'mssql'
-          Sequel.ts_require 'adapters/odbc/mssql'
-          extend Sequel::ODBC::MSSQL::DatabaseMethods
-          @dataset_class = Sequel::ODBC::MSSQL::Dataset
-          set_mssql_unicode_strings
-        when 'progress'
-          Sequel.ts_require 'adapters/shared/progress'
-          extend Sequel::Progress::DatabaseMethods
-          extend_datasets(Sequel::Progress::DatasetMethods)
-        when 'db2'
-          Sequel.ts_require 'adapters/shared/db2'
-          extend ::Sequel::DB2::DatabaseMethods
-          extend_datasets ::Sequel::DB2::DatasetMethods
-        end
-      end
-
       def connect(server)
         opts = server_opts(server)
-        if opts.include? :driver
+        conn = if opts.include?(:drvconnect)
+          ::ODBC::Database.new.drvconnect(opts[:drvconnect])
+        elsif opts.include?(:driver)
           drv = ::ODBC::Driver.new
           drv.name = 'Sequel ODBC Driver130'
           opts.each do |param, value|
@@ -39,10 +26,9 @@ module Sequel
             end
             drv.attrs[param.to_s.upcase] = value.to_s
           end
-          db = ::ODBC::Database.new
-          conn = db.drvconnect(drv)
+          ::ODBC::Database.new.drvconnect(drv)
         else
-          conn = ::ODBC::connect(opts[:database], opts[:user], opts[:password])
+          ::ODBC::connect(opts[:database], opts[:user], opts[:password])
         end
         conn.autocommit = true
         conn
@@ -52,7 +38,7 @@ module Sequel
         c.disconnect
       end
 
-      def execute(sql, opts={})
+      def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           begin
             r = log_yield(sql){conn.run(sql)}
@@ -66,7 +52,7 @@ module Sequel
         end
       end
       
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           begin
             log_yield(sql){conn.do(sql)}
@@ -75,10 +61,15 @@ module Sequel
           end
         end
       end
-      alias do execute_dui
 
       private
       
+      def adapter_initialize
+        if (db_type = @opts[:db_type]) && (prok = Sequel::Database.load_adapter(db_type.to_sym, :map=>DATABASE_SETUP, :subdir=>'odbc'))
+          prok.call(self)
+        end
+      end
+
       def connection_execute_method
         :do
       end
@@ -103,13 +94,13 @@ module Sequel
       def fetch_rows(sql)
         execute(sql) do |s|
           i = -1
-          cols = s.columns(true).map{|c| [output_identifier(c.name), i+=1]}
+          cols = s.columns(true).map{|c| [output_identifier(c.name), c.type, i+=1]}
           columns = cols.map{|c| c.at(0)}
           @columns = columns
           if rows = s.fetch_all
             rows.each do |row|
               hash = {}
-              cols.each{|n,i| hash[n] = convert_odbc_value(row[i])}
+              cols.each{|n,t,j| hash[n] = convert_odbc_value(row[j], t)}
               yield hash
             end
           end
@@ -119,7 +110,7 @@ module Sequel
       
       private
 
-      def convert_odbc_value(v)
+      def convert_odbc_value(v, t)
         # When fetching a result set, the Ruby ODBC driver converts all ODBC 
         # SQL types to an equivalent Ruby type; with the exception of
         # SQL_TYPE_DATE, SQL_TYPE_TIME and SQL_TYPE_TIMESTAMP.
@@ -128,13 +119,17 @@ module Sequel
         # ODBCColumn#mapSqlTypeToGenericType and Column#klass.
         case v
         when ::ODBC::TimeStamp
-          db.to_application_timestamp([v.year, v.month, v.day, v.hour, v.minute, v.second])
+          db.to_application_timestamp([v.year, v.month, v.day, v.hour, v.minute, v.second, v.fraction])
         when ::ODBC::Time
           Sequel::SQLTime.create(v.hour, v.minute, v.second)
         when ::ODBC::Date
           Date.new(v.year, v.month, v.day)
         else
-          v
+          if t == ::ODBC::SQL_BIT
+            v == 1
+          else
+            v
+          end
         end
       end
       

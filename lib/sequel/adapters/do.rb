@@ -11,29 +11,17 @@ module Sequel
   # *  Sequel.connect('do:postgres://user:password@host/database')
   # *  Sequel.connect('do:mysql://user:password@host/database')
   module DataObjects
-    # Contains procs keyed on sub adapter type that extend the
+    # Contains procs keyed on subadapter type that extend the
     # given database object so it supports the correct database type.
-    DATABASE_SETUP = {:postgres=>proc do |db|
-        Sequel.tsk_require 'do_postgres'
-        Sequel.ts_require 'adapters/do/postgres'
-        db.extend(Sequel::DataObjects::Postgres::DatabaseMethods)
-        db.extend_datasets Sequel::Postgres::DatasetMethods
-      end,
-      :mysql=>proc do |db|
-        Sequel.tsk_require 'do_mysql'
-        Sequel.ts_require 'adapters/do/mysql'
-        db.extend(Sequel::DataObjects::MySQL::DatabaseMethods)
-        db.dataset_class = Sequel::DataObjects::MySQL::Dataset
-      end,
-      :sqlite3=>proc do |db|
-        Sequel.tsk_require 'do_sqlite3'
-        Sequel.ts_require 'adapters/do/sqlite'
-        db.extend(Sequel::DataObjects::SQLite::DatabaseMethods)
-        db.extend_datasets Sequel::SQLite::DatasetMethods
-        db.set_integer_booleans
-      end
-    }
+    DATABASE_SETUP = {}
       
+    # Wrapper for require that raises AdapterNotFound if driver could not be loaded
+    def self.load_driver(path)
+      require path
+    rescue LoadError => e
+      raise AdapterNotFound, e.message
+    end
+        
     # DataObjects uses it's own internal connection pooling in addition to the
     # pooling that Sequel uses.  You should make sure that you don't set
     # the connection pool size to more than 8 for a
@@ -43,18 +31,6 @@ module Sequel
       DISCONNECT_ERROR_RE = /terminating connection due to administrator command/
 
       set_adapter_scheme :do
-      
-      # Call the DATABASE_SETUP proc directly after initialization,
-      # so the object always uses sub adapter specific code.  Also,
-      # raise an error immediately if the connection doesn't have a
-      # uri, since DataObjects requires one.
-      def initialize(opts)
-        super
-        raise(Error, "No connection string specified") unless uri
-        if prok = DATABASE_SETUP[subadapter.to_sym]
-          prok.call(self)
-        end
-      end
       
       # Setup a DataObjects::Connection to the database.
       def connect(server)
@@ -70,7 +46,7 @@ module Sequel
       # a SELECT statement is being used (or something else that returns rows).
       # Otherwise, the return value is the insert id if opts[:type] is :insert,
       # or the number of affected rows, otherwise.
-      def execute(sql, opts={})
+      def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           begin
             command = conn.create_command(sql)
@@ -94,13 +70,13 @@ module Sequel
       
       # Execute the SQL on the this database, returning the number of affected
       # rows.
-      def execute_dui(sql, opts={})
+      def execute_dui(sql, opts=OPTS)
         execute(sql, opts)
       end
       
       # Execute the SQL on this database, returning the primary key of the
       # table being inserted to.
-      def execute_insert(sql, opts={})
+      def execute_insert(sql, opts=OPTS)
         execute(sql, opts.merge(:type=>:insert))
       end
       
@@ -112,12 +88,23 @@ module Sequel
       
       # Return the DataObjects URI for the Sequel URI, removing the do:
       # prefix.
-      def uri(opts={})
+      def uri(opts=OPTS)
         opts = @opts.merge(opts)
         (opts[:uri] || opts[:url]).sub(/\Ado:/, '')
       end
 
       private
+      
+      # Call the DATABASE_SETUP proc directly after initialization,
+      # so the object always uses subadapter specific code.  Also,
+      # raise an error immediately if the connection doesn't have a
+      # uri, since DataObjects requires one.
+      def adapter_initialize
+        raise(Error, "No connection string specified") unless uri
+        if prok = Sequel::Database.load_adapter(subadapter.to_sym, :map=>DATABASE_SETUP, :subdir=>'do')
+          prok.call(self)
+        end
+      end
       
       # Method to call on a statement object to execute SQL that does
       # not return any rows.

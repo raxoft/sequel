@@ -6,10 +6,14 @@ module Sequel
     # ---------------------
 
     # Array of supported database adapters
-    ADAPTERS = %w'ado amalgalite cubrid db2 dbi do firebird ibmdb informix jdbc mock mysql mysql2 odbc openbase oracle postgres sqlite swift tinytds'.collect{|x| x.to_sym}
+    ADAPTERS = %w'ado amalgalite cubrid do firebird ibmdb informix jdbc mock mysql mysql2 odbc oracle postgres sqlanywhere sqlite swift tinytds'.collect(&:to_sym)
 
-    # Whether to use the single threaded connection pool by default
-    @@single_threaded = false
+    @single_threaded = false
+
+    class << self
+      # Whether to use the single threaded connection pool by default
+      attr_accessor :single_threaded
+    end
 
     # The Database subclass for the given adapter scheme.
     # Raises Sequel::AdapterNotFound if the adapter
@@ -18,48 +22,31 @@ module Sequel
       return scheme if scheme.is_a?(Class)
 
       scheme = scheme.to_s.gsub('-', '_').to_sym
-      
-      unless klass = ADAPTER_MAP[scheme]
-        # attempt to load the adapter file
-        begin
-          Sequel.tsk_require "sequel/adapters/#{scheme}"
-        rescue LoadError => e
-          raise Sequel.convert_exception_class(e, AdapterNotFound)
-        end
-        
-        # make sure we actually loaded the adapter
-        unless klass = ADAPTER_MAP[scheme]
-          raise AdapterNotFound, "Could not load #{scheme} adapter: adapter class not registered in ADAPTER_MAP"
-        end
-      end
-      klass
+
+      load_adapter(scheme)
     end
-        
+
     # Returns the scheme symbol for the Database class.
     def self.adapter_scheme
       @scheme
     end
     
     # Connects to a database.  See Sequel.connect.
-    def self.connect(conn_string, opts = {})
+    def self.connect(conn_string, opts = OPTS)
       case conn_string
       when String
         if match = /\A(jdbc|do):/o.match(conn_string)
           c = adapter_class(match[1].to_sym)
           opts = opts.merge(:orig_opts=>opts.dup)
-          opts = {:uri=>conn_string}.merge(opts)
+          opts = {:uri=>conn_string}.merge!(opts)
         else
           uri = URI.parse(conn_string)
           scheme = uri.scheme
-          scheme = :dbi if scheme =~ /\Adbi-/
           c = adapter_class(scheme)
           uri_options = c.send(:uri_to_options, uri)
           uri.query.split('&').collect{|s| s.split('=')}.each{|k,v| uri_options[k.to_sym] = v if k && !k.empty?} unless uri.query.to_s.strip.empty?
-          uri_options.to_a.each{|k,v| uri_options[k] = URI.unescape(v) if v.is_a?(String)}
-          opts = opts.merge(:orig_opts=>opts.dup)
-          opts[:uri] = conn_string
-          opts = uri_options.merge(opts)
-          opts[:adapter] = scheme
+          uri_options.to_a.each{|k,v| uri_options[k] = (defined?(URI::DEFAULT_PARSER) ? URI::DEFAULT_PARSER : URI).unescape(v) if v.is_a?(String)}
+          opts = uri_options.merge(opts).merge!(:orig_opts=>opts.dup, :uri=>conn_string, :adapter=>scheme)
         end
       when Hash
         opts = conn_string.merge(opts)
@@ -77,20 +64,50 @@ module Sequel
       begin
         db = c.new(opts)
         db.test_connection if opts[:test] && db.send(:typecast_value_boolean, opts[:test])
-        result = yield(db) if block_given?
+        if block_given?
+          return yield(db)
+        end
       ensure
         if block_given?
           db.disconnect if db
           Sequel.synchronize{::Sequel::DATABASES.delete(db)}
         end
       end
-      block_given? ? result : db
+      db
     end
     
-    # Sets the default single_threaded mode for new databases.
-    # See Sequel.single_threaded=.
-    def self.single_threaded=(value)
-      @@single_threaded = value
+    # Load the adapter from the file system.  Raises Sequel::AdapterNotFound
+    # if the adapter cannot be loaded, or if the adapter isn't registered
+    # correctly after being loaded. Options:
+    # :map :: The Hash in which to look for an already loaded adapter (defaults to ADAPTER_MAP).
+    # :subdir :: The subdirectory of sequel/adapters to look in, only to be used for loading
+    #            subadapters.
+    def self.load_adapter(scheme, opts=OPTS)
+      map = opts[:map] || ADAPTER_MAP
+      if subdir = opts[:subdir]
+        file = "#{subdir}/#{scheme}"
+      else
+        file = scheme
+      end
+      
+      unless obj = Sequel.synchronize{map[scheme]}
+        # attempt to load the adapter file
+        begin
+          require "sequel/adapters/#{file}"
+        rescue LoadError => e
+          # If subadapter file doesn't exist, just return, 
+          # using the main adapter class without database customizations.
+          return if subdir
+          raise Sequel.convert_exception_class(e, AdapterNotFound)
+        end
+        
+        # make sure we actually loaded the adapter
+        unless obj = Sequel.synchronize{map[scheme]}
+          raise AdapterNotFound, "Could not load #{file} adapter: adapter class not registered in ADAPTER_MAP"
+        end
+      end
+
+      obj
     end
 
     # Sets the adapter scheme for the Database class. Call this method in
@@ -107,7 +124,7 @@ module Sequel
     #   Sequel.connect('mydb://user:password@dbserver/mydb')
     def self.set_adapter_scheme(scheme) # :nodoc:
       @scheme = scheme
-      ADAPTER_MAP[scheme.to_sym] = self
+      Sequel.synchronize{ADAPTER_MAP[scheme] = self}
     end
     private_class_method :set_adapter_scheme
     
@@ -141,11 +158,6 @@ module Sequel
       end
     end
 
-    # Connects to the database. This method should be overridden by descendants.
-    def connect(server)
-      raise NotImplemented, "#connect should be overridden by adapters"
-    end
-    
     # The database type for this database object, the same as the adapter scheme
     # by default.  Should be overridden in adapters (especially shared adapters)
     # to be the correct type, so that even if two separate Database objects are
@@ -169,7 +181,7 @@ module Sequel
     #   DB.disconnect # All servers
     #   DB.disconnect(:servers=>:server1) # Single server
     #   DB.disconnect(:servers=>[:server1, :server2]) # Multiple servers
-    def disconnect(opts = {})
+    def disconnect(opts = OPTS)
       pool.disconnect(opts)
     end
 
@@ -186,6 +198,7 @@ module Sequel
     #
     #   DB.each_server{|db| db.create_table(:users){primary_key :id; String :name}}
     def each_server(&block)
+      raise(Error, "Database#each_server must be passed a block") unless block
       servers.each{|s| self.class.connect(server_opts(s), &block)}
     end
 
@@ -230,7 +243,7 @@ module Sequel
       # server, instead of the :default server.
       #
       #   DB.synchronize do |conn|
-      #     ...
+      #     # ...
       #   end
       def synchronize(server=nil)
         @pool.hold(server || :default){|conn| yield conn}

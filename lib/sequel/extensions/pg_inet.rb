@@ -1,18 +1,17 @@
 # The pg_inet extension adds support for Sequel to handle
 # PostgreSQL's inet and cidr types using ruby's IPAddr class.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when inet/cidr fields are retrieved, they are returned as
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when inet/cidr fields are retrieved, they are returned as
 # IPAddr instances
 #
-# After loading the extension, you should extend your dataset
-# with a module so that it correctly handles the inet/cidr type:
+# To use this extension, load it into your database:
 #
 #   DB.extension :pg_inet
 #
-# If you are not using the native postgres adapter, you probably
-# also want to use the typecast_on_load plugin in the model, and
-# set it to typecast the inet/cidr column(s) on load.
+# If you are not using the native postgres or jdbc/postgresql adapters and are using inet/cidr
+# types as model column values you probably should use the
+# pg_typecast_on_load plugin if the column values are returned as a string.
 #
 # This extension integrates with the pg_array extension.  If you plan
 # to use the inet[] or cidr[] types, load the pg_array extension before
@@ -25,6 +24,9 @@
 # addresses, so these will still be returned as strings.  The exception
 # to this is that the pg_array extension integration will recognize
 # macaddr[] types return them as arrays of strings.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using inet/cidr columns in CREATE/ALTER TABLE statements.
 
 require 'ipaddr'
 Sequel.require 'adapters/utils/pg_types'
@@ -33,12 +35,15 @@ module Sequel
   module Postgres
     # Methods enabling Database object integration with the inet/cidr types.
     module InetDatabaseMethods
-
       # Reset the conversion procs when extending the Database object, so
       # it will pick up the inet/cidr converter.  Also, extend the datasets
       # with support for literalizing the IPAddr types.
       def self.extended(db)
-        db.extend_datasets(InetDatasetMethods)
+        db.instance_eval do
+          extend_datasets(InetDatasetMethods)
+          copy_conversion_procs([869, 650, 1041, 651, 1040])
+          @schema_type_classes[:ipaddr] = IPAddr
+        end
       end
 
       # Convert an IPAddr arg to a string.  Probably not necessary, but done
@@ -52,16 +57,6 @@ module Sequel
         end
       end
 
-      # Make the column type detection recognize the inet and cidr types.
-      def schema_column_type(db_type)
-        case db_type
-        when 'inet', 'cidr'
-          :ipaddr
-        else
-          super
-        end
-      end
-
       private
 
       # Handle inet[]/cidr[] types in bound variables.
@@ -69,6 +64,16 @@ module Sequel
         case a
         when IPAddr
           "\"#{a.to_s}/#{a.instance_variable_get(:@mask_addr).to_s(2).count('1')}\""
+        else
+          super
+        end
+      end
+
+      # Make the column type detection recognize the inet and cidr types.
+      def schema_column_type(db_type)
+        case db_type
+        when 'inet', 'cidr'
+          :ipaddr
         else
           super
         end
